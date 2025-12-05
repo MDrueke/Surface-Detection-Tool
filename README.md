@@ -13,7 +13,7 @@ The tool analyzes recordings to classify channels as:
 - **Noisy channels**: High-frequency power or excessive correlation, indicating noise
 - **Outside channels**: Channels above the brain surface (in air/saline)
 
-![Surface Detection Example](example_image.png)
+![Surface Detection Example](example.png)
 
 ## Requirements
 

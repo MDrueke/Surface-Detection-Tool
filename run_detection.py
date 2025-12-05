@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.signal
 import scipy.stats
+
 from reader import Reader
 
 
@@ -37,6 +38,8 @@ def detect_bad_channels(
     psd_hf_threshold=None,
     display=False,
     apply_cmr_flag=False,
+    debug=False,
+    verbose=True,
 ):
     """
     Bad channels detection for Neuropixel probes
@@ -176,8 +179,26 @@ def detect_bad_channels(
         indx_threshold = np.floor(np.median(indx)).astype(int)
         threshold = signal_noisy[indx_threshold]
         ioutside = np.where(signal_noisy < threshold)[0]
+        if verbose:
+            print(
+                f"LF coherence threshold computed: {threshold:.4f} at channel {indx_threshold}"
+            )
+        if debug:
+            print(
+                f"  Found {len(indx)} channels with sharp gradient drops (diff < -0.02)"
+            )
+            print(f"  Gradient drop channels: {indx}")
+            print(f"  Using median index: {indx_threshold}")
     else:
         ioutside = np.array([])
+        threshold = None
+        if verbose:
+            print(
+                "LF coherence threshold: No sharp gradient drops detected (no surface found)"
+            )
+        if debug:
+            print(f"  Min gradient value: {np.min(diff_x):.4f}")
+            print(f"  Gradient threshold used: -0.02")
 
     if ioutside.size > 0 and ioutside[-1] == (nc - 1):
         a = np.cumsum(np.r_[0, np.diff(ioutside) - 1])
@@ -188,16 +209,89 @@ def detect_bad_channels(
     ichannels[idead] = 1
     ichannels[inoisy] = 2
 
+    # Store debug information if requested
+    if debug:
+        xfeats["debug"] = {
+            "signal_noisy": signal_noisy,
+            "signal_filtered": signal_filtered,
+            "diff_x": diff_x,
+            "gradient_threshold": -0.02,
+            "lf_threshold": threshold,
+            "lf_threshold_channel": indx_threshold if indx.size > 0 else None,
+            "gradient_drop_indices": indx,
+        }
+
     return ichannels, xfeats
 
 
+def compute_firing_rates(sr, n_batches=20, batch_duration=0.3, threshold=-5.0):
+    """
+    Compute firing rates for all channels across multiple time chunks.
+    Always applies highpass filtering and CMR for spike detection.
+
+    :param sr: Reader object
+    :param n_batches: number of time chunks to analyze
+    :param batch_duration: duration of each chunk in seconds
+    :param threshold: spike detection threshold in multiples of MAD (default: -5.0)
+    :return: firing_rates: array of firing rates (spikes/sec) per channel [nc]
+    """
+    nc = sr.nc - sr.nsync
+    total_spikes = np.zeros(nc)
+    total_duration = 0
+
+    # Highpass filter for spike detection (300 Hz for AP band)
+    fs = sr.fs
+    sos_hp = scipy.signal.butter(N=3, Wn=300 / fs * 2, btype="highpass", output="sos")
+
+    for i, t0 in enumerate(np.linspace(0, sr.rl - batch_duration, n_batches)):
+        sl = slice(int(t0 * fs), int((t0 + batch_duration) * fs))
+        raw = sr[sl, :nc].T  # [nc, ns]
+
+        # Remove DC offset
+        raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
+
+        # Apply CMR
+        raw = apply_cmr(raw)
+
+        # Apply highpass filter
+        raw_hp = scipy.signal.sosfiltfilt(sos_hp, raw, axis=1)
+
+        # Compute threshold per channel: threshold * MAD (Median Absolute Deviation)
+        # MAD is robust to outliers
+        mad = np.median(np.abs(raw_hp), axis=1)
+        thresholds = threshold * mad
+
+        # Count threshold crossings (spikes)
+        for ch in range(nc):
+            # Find negative threshold crossings
+            crossings = np.where(raw_hp[ch, :] < thresholds[ch])[0]
+            if len(crossings) > 0:
+                # Remove duplicates within refractory period (1 ms = fs/1000 samples)
+                refractory_samples = int(fs / 1000)
+                diff = np.diff(crossings)
+                valid = np.r_[True, diff > refractory_samples]
+                total_spikes[ch] += np.sum(valid)
+
+        total_duration += batch_duration
+
+    # Compute firing rates (spikes per second)
+    firing_rates = total_spikes / total_duration
+
+    return firing_rates
+
+
 def detect_bad_channels_cbin(
-    bin_file, n_batches=10, batch_duration=0.3, display=False, apply_cmr_flag=False
+    bin_file,
+    n_batches=20,
+    batch_duration=0.3,
+    display=False,
+    apply_cmr_flag=False,
+    debug=False,
 ):
     """
     Runs a ap-binary file scan to automatically detect faulty channels
     :param bin_file: full file path to the binary or compressed binary file from spikeglx
-    :param n_batches: number of batches throughout the file (defaults to 10)
+    :param n_batches: number of batches throughout the file (defaults to 20)
     :param batch_duration: batch length in seconds, defaults to 0.3
     :param display: if True will return a figure with features and an excerpt of the raw data
     :param apply_cmr_flag: if True, apply Common Median Referencing to the data
@@ -210,8 +304,13 @@ def detect_bad_channels_cbin(
     for i, t0 in enumerate(np.linspace(0, sr.rl - batch_duration, n_batches)):
         sl = slice(int(t0 * sr.fs), int((t0 + batch_duration) * sr.fs))
         raw = sr[sl, :nc].T
+        # Only pass debug=True and verbose=True on the last batch to avoid spamming console
         channel_labels[:, i], _xfeats = detect_bad_channels(
-            raw, fs=sr.fs, apply_cmr_flag=apply_cmr_flag
+            raw,
+            fs=sr.fs,
+            apply_cmr_flag=apply_cmr_flag,
+            debug=(debug and i == n_batches - 1),
+            verbose=(i == n_batches - 1),  # Only print threshold on last batch
         )
 
     # Aggregate the labels for robust detection
@@ -219,6 +318,13 @@ def detect_bad_channels_cbin(
 
     # Flatten to 1D array (mode returns shape (nc, 1))
     channel_flags = channel_flags.flatten()
+
+    # Print summary of aggregated detection
+    num_outside = np.sum(channel_flags == 3)
+    if num_outside > 0:
+        print(
+            f"Final aggregated detection: {num_outside} channels marked as outside brain"
+        )
 
     # Apply CMR to the raw data for plotting if requested
     # (The raw variable here is from the last chunk iteration)

@@ -1,1 +1,6 @@
-- PyQt5
+numpy
+scipy
+matplotlib
+mtscomp
+neuropixel
+iblutil

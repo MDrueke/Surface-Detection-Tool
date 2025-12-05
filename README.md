@@ -1,61 +1,126 @@
-# Surface Detection Script Documentation
+# Surface Detection for Neuropixel Recordings
 
-This document outlines the functionality of the standalone surface detection script and clarifies its relationship with the main IBL pipeline.
+## Attribution
 
-## Goal
+The channel quality detection algorithms (dead, noisy, and outside channel detection) used in this tool are derived from the [IBL sorter pipeline](https://github.com/int-brain-lab/ibl-sorter). The pipeline is described in the International Brain Laboratory's technical documentation: [https://doi.org/10.6084/m9.figshare.19705522.v4](https://doi.org/10.6084/m9.figshare.19705522.v4).
 
-The primary goal of this script is to extract the bad channel detection algorithm, which includes surface detection (i.e., identifying channels outside the brain), from the `ibl-sorter` pipeline into a self-contained, runnable script.
+## Overview
 
-## Current Status
+This tool detects the brain surface and identifies bad channels in Neuropixel electrophysiology recordings. It processes SpikeGLX binary files (.bin or .cbin) and provides an interactive visualization for manual verification and adjustment of the detected surface channel.
 
-The surface detection script has been successfully extracted from the IBL pipeline and is now fully functional. The script correctly replicates the bad channel detection algorithm, matching the IBL pipeline output to within floating point precision (max difference: 5.5e-05).
+The tool analyzes recordings to classify channels as:
+- **Dead channels**: Low signal correlation, likely non-functional
+- **Noisy channels**: High-frequency power or excessive correlation, indicating noise
+- **Outside channels**: Channels above the brain surface (in air/saline)
 
-## Debugging Journey (Resolved)
+## Requirements
 
-During extraction, we encountered discrepancies between our output and the reference data. After investigation, we identified:
+Install dependencies:
 
-1.  **Typo in xcor_lf calculation:** The initial copy had `detrend(xcor, 11)` instead of `detrend(xcorf, 11)` on line 97 of `run_detection.py`. Fixed.
+```bash
+pip install -r requirements.txt
+```
 
-2.  **System-wide vs. local ibldsp package:** The iblsorter package installs ibldsp system-wide. When the IBL pipeline runs, it imports from `/home/mdrueke/anaconda3/lib/python3.13/site-packages/ibldsp/`, NOT the local copy. The `run_detection.py` file replicates this code for standalone use.
+Required packages:
+- numpy
+- scipy
+- matplotlib
+- mtscomp (for reading .cbin compressed files)
+- neuropixel
+- iblutil
 
-3.  **Single chunk vs. aggregation:** The IBL pipeline's `get_good_channels` function:
-    *   Loops over 25 time chunks (0.4s each) throughout the recording
-    *   Calls `detect_bad_channels` on each chunk
-    *   Takes the MODE of channel labels across chunks for robust classification
-    *   Saves features (xfeats) from ONLY THE LAST chunk for plotting/QC
-    
-    The standalone script now mimics this by calling `detect_bad_channels` on a single chunk (the last time point at t=3116s), matching the IBL reference data.
+## Usage
 
-4.  **Alternative robust approach:** The `detect_bad_channels_cbin` function in `run_detection.py` provides a more robust alternative that aggregates features across multiple chunks. Use this if you want detection on the full recording rather than a single snapshot.
+### GUI Mode (Default)
 
-## How the IBL Pipeline Works
+Run without arguments to launch the file picker and options dialog:
 
-The bad channel detection logic is orchestrated by the following functions:
+```bash
+python main.py
+```
 
-1.  **`iblsorter.preprocess.get_good_channels`**:
-    *   This is the high-level function that manages the QC process.
-    *   It calls `detect_bad_channels` over several chunks of the data file to get robust channel labels and features.
-    *   Crucially, for plotting, it applies a `scipy.signal.medfilt` to the `xcor_lf` feature before passing the data to the plotting function.
-    *   It saves the final plot as `_iblqc_channel_detection.png`.
+This opens:
+1. A file selection dialog to choose your .bin or .cbin file
+2. An options dialog to configure preprocessing settings
+3. An interactive plot for reviewing and adjusting the detected surface channel
 
-2.  **`ibldsp.voltage.detect_bad_channels`**:
-    *   This is the core function that computes metrics to classify channels as good, dead, noisy, or outside the brain.
-    *   It calculates several features, including `xcor_lf` (LF coherence), which is used to find the brain surface.
-    *   The `xcor_lf` feature is calculated by cross-correlating each channel with a median reference trace and then applying a `detrend` operation. The specific `detrend` logic is what creates the characteristic shape of the curve at the probe edges.
+### Command Line Mode
 
-## Code Location in This Directory (`surfaceDetection/`)
+Specify the file path and options directly:
 
-The IBL pipeline logic has been copied into the following files within this directory:
+```bash
+python main.py /path/to/recording.ap.bin [OPTIONS]
+```
 
-1.  **`run_detection.py`**:
-    *   Contains `detect_bad_channels_cbin`: A wrapper function that reads data in chunks from a raw data file and passes them to `detect_bad_channels`. This mimics the chunking behavior of the IBL pipeline.
-    *   Contains `detect_bad_channels`: A direct copy of the core logic from `ibldsp/voltage.py`.
+Or use the `--bin_file` flag:
 
-2.  **`plotting.py`**:
-    *   Contains `show_channels_labels`: A copy of the plotting function from `ibldsp/plots.py` used to visualize the detection results.
+```bash
+python main.py --bin_file /path/to/recording.ap.bin [OPTIONS]
+```
 
-3.  **`reader.py`**:
-    *   Contains the `Reader` class, a copy of the `spikeglx.Reader` from the IBL pipeline, which handles reading both `.bin` and compressed `.cbin` files.
+### Command Line Options
 
-4.  **`main.py`**:
-    *   The main entry point that uses the functions and classes above to run the detection and generate a plot.
+**File input:**
+- `PATH` or `--bin_file PATH` - Path to the .ap.bin or .ap.cbin file
+
+**Detection preprocessing:**
+- `--cmr` - Apply Common Median Referencing to data before running detection algorithms
+- `--hf FREQUENCY` - Apply highpass filter (Hz) to data before detection (e.g., `--hf 300`)
+- `--n_chunks N` - Number of time chunks to analyze (default: 20)
+- `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (default: -5.0)
+
+**Debug options:**
+- `--debug` - Enable debug mode: prints detailed detection info and saves intermediate data to .npy files
+
+### Examples
+
+**Basic usage with GUI:**
+```bash
+python main.py
+```
+
+**Command line with Common Median Referencing:**
+```bash
+python main.py recording.ap.bin --cmr
+```
+
+**With preprocessing and custom parameters:**
+```bash
+python main.py recording.ap.bin --cmr --hf 300 --n_chunks 30 --spike_threshold -4.5
+```
+
+**Debug mode to save intermediate features:**
+```bash
+python main.py recording.ap.bin --debug
+```
+
+## Preprocessing Options
+
+The `--cmr` and `--hf` flags control the preprocessing applied to the data **before** the detection algorithms analyze it. These options affect which channels are classified as dead, noisy, or outside.
+
+The interactive visualization includes checkboxes for CMR and highpass filtering. These checkboxes **only change the displayed raw voltage snippet** and do not affect the channel detection results.
+
+## Interactive Plot
+
+The visualization shows:
+- **Dead channels**: Channels with low high-frequency coherence (blue)
+- **Noisy channels**: Channels with high power or correlation (red/orange)  
+- **Outside channels**: Channels detected above the brain surface (yellow/green)
+- **Voltage heatmap**: Raw voltage snippet with optional filtering
+- **Firing rate**: Spike activity across channels
+
+**Interaction:**
+- Click on any subplot to manually select a different surface channel
+- Hover over the plots to see channel numbers and values in the bottom-left corner
+
+The tool saves the final selection to a `.surface_channel.txt` file next to the input file.
+
+## Multi-Shank Support
+
+For multi-shank probes (e.g., Neuropixels 2.0), the tool automatically detects shanks and processes each independently. Each shank gets its own interactive plot and surface channel output.
+
+## Output
+
+The tool saves:
+- `<filename>.surface_channel.txt` - The detected (or manually selected) surface channel number
+- `<filename>.debug.npy` - Debug data with detection features (if `--debug` flag is used)

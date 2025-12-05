@@ -208,3 +208,7 @@ __marimo__/
 
 # Mac stuff
 .DS_Store
+
+# Project-specific
+load_debug.py
+SURFACE_DETECTION_IMPROVEMENT_PROPOSALS.md

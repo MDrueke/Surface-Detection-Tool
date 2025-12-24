@@ -6,11 +6,11 @@ import time
 from pathlib import Path
 
 import mtscomp
-import neuropixel
 import numpy as np
 import one.alf.path
-from iblutil.io import hashfile
-from iblutil.util import Bunch
+import utils as neuropixel
+from utils import Bunch
+from utils import sha1
 
 SAMPLE_SIZE = 2  # int16
 DEFAULT_BATCH_SIZE = 1e6
@@ -453,7 +453,7 @@ class Reader:
             sm = sm.upper()
         else:
             sm = self.meta.fileSHA1
-        sc = hashfile.sha1(self.file_bin).upper()
+        sc = sha1(self.file_bin).upper()
         if sm == sc:
             log_func = _logger.info
         else:

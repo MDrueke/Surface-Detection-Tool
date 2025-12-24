@@ -130,7 +130,11 @@ def detect_bad_channels(
     if apply_cmr_flag:
         raw = apply_cmr(raw)
     xcor = channels_similarity(raw)
-    fscale, psd = scipy.signal.welch(raw * 1e6, fs=fs)  # units; uV ** 2 / Hz
+    # Compute PSD using Welch's method
+    # Use nperseg equal to the number of samples (or a large enough value) 
+    # to maintain sufficient frequency resolution. Default nperseg=256 gives ~117Hz res at 30kHz!
+    n_samples = raw.shape[-1]
+    fscale, psd = scipy.signal.welch(raw * 1e6, fs=fs, nperseg=n_samples)  # units; uV ** 2 / Hz
     # auto-detection of the band with which we are working
     band = "ap" if fs > 2600 else "lf"
     # the LFP band data is obviously much stronger so auto-adjust the default threshold
@@ -139,13 +143,32 @@ def detect_bad_channels(
         filter_kwargs = {"N": 3, "Wn": 300 / fs * 2, "btype": "highpass"}
     elif band == "lf":
         psd_hf_threshold = 1.4 if psd_hf_threshold is None else psd_hf_threshold
+        psd_hf_threshold = 1.4 if psd_hf_threshold is None else psd_hf_threshold
         filter_kwargs = {"N": 3, "Wn": 1 / fs * 2, "btype": "highpass"}
     sos_hp = scipy.signal.butter(**filter_kwargs, output="sos")
     hf = scipy.signal.sosfiltfilt(sos_hp, raw)
     xcorf = channels_similarity(hf)
+
+    # LF Power (0-100 Hz)
+    sos_lp = scipy.signal.butter(N=3, Wn=100 / fs * 2, btype="lowpass", output="sos")
+    lf = scipy.signal.sosfiltfilt(sos_lp, raw)
+    rms_lf = rms(lf)
+
+    # Gamma / HF Power (40-100 Hz)
+    # psd is [nc, n_freqs], fscale is [n_freqs]
+    # mask for 40-100 Hz
+    mask_gamma = (fscale >= 40) & (fscale <= 100)
+    # Mean power in gamma band
+    if np.sum(mask_gamma) > 0:
+        power_gamma = np.mean(psd[:, mask_gamma], axis=-1)
+    else:
+        power_gamma = np.zeros(nc)
+
     xfeats = {
         "ind": np.arange(nc),
         "rms_raw": rms(raw),  # very similar to the rms avfter butterworth filter
+        "rms_lf": rms_lf,
+        "power_gamma": power_gamma,
         "xcor_hf": detrend(xcor, 11),
         "xcor_lf": xcorf - detrend(xcorf, 11) - 1,
         "psd_hf": np.mean(psd[:, fscale > (fs / 2 * 0.8)], axis=-1),  # 80% nyquists
@@ -224,7 +247,7 @@ def detect_bad_channels(
     return ichannels, xfeats
 
 
-def compute_firing_rates(sr, n_batches=20, batch_duration=0.3, threshold=-5.0):
+def compute_firing_rates(sr, n_batches=20, batch_duration=0.4, threshold=-5.0):
     """
     Compute firing rates for all channels across multiple time chunks.
     Always applies highpass filtering and CMR for spike detection.
@@ -234,10 +257,18 @@ def compute_firing_rates(sr, n_batches=20, batch_duration=0.3, threshold=-5.0):
     :param batch_duration: duration of each chunk in seconds
     :param threshold: spike detection threshold in multiples of MAD (default: -5.0)
     :return: firing_rates: array of firing rates (spikes/sec) per channel [nc]
+             spike_amplitudes: array of median spike amplitudes (uV/mad-units) per channel [nc]
     """
     nc = sr.nc - sr.nsync
     total_spikes = np.zeros(nc)
     total_duration = 0
+    
+    # Store all amplitudes to compute median later
+    # List of lists? or just accumulate and take median at the end?
+    # Since we process in batches, we can't easily take global median without storing all spikes.
+    # Storing all spikes might be heavy if very long recording.
+    # Compromise: Store list of amplitudes per channel
+    all_amplitudes = [[] for _ in range(nc)]
 
     # Highpass filter for spike detection (300 Hz for AP band)
     fs = sr.fs
@@ -271,19 +302,44 @@ def compute_firing_rates(sr, n_batches=20, batch_duration=0.3, threshold=-5.0):
                 diff = np.diff(crossings)
                 valid = np.r_[True, diff > refractory_samples]
                 total_spikes[ch] += np.sum(valid)
+                
+                # Collect amplitudes of valid spikes
+                # crossings[valid] gives indices
+                # We want the amplitude at the crossing (or better, the peak near crossing?)
+                # For simplicity and speed, let's take the value at the crossing (which is < threshold)
+                # Or find the minimum in a small window.
+                # Let's just take the value at crossing or the minimum in next few samples.
+                # Simple approach: Minimum value in 1ms window after crossing
+                for idx in crossings[valid]:
+                     # Check bounds
+                     end_search = min(idx + int(fs/1000), raw_hp.shape[1])
+                     if end_search > idx:
+                         # Spikes are negative
+                         amp = np.min(raw_hp[ch, idx:end_search])
+                         all_amplitudes[ch].append(amp)
+                     else:
+                         all_amplitudes[ch].append(raw_hp[ch, idx])
 
         total_duration += batch_duration
 
     # Compute firing rates (spikes per second)
     firing_rates = total_spikes / total_duration
+    
+    # Compute median spike amplitude
+    spike_amplitudes = np.zeros(nc)
+    for ch in range(nc):
+        if len(all_amplitudes[ch]) > 0:
+            spike_amplitudes[ch] = np.median(all_amplitudes[ch])
+        else:
+            spike_amplitudes[ch] = 0 # No spikes
 
-    return firing_rates
+    return firing_rates, spike_amplitudes
 
 
 def detect_bad_channels_cbin(
     bin_file,
     n_batches=20,
-    batch_duration=0.3,
+    batch_duration=0.4,
     display=False,
     apply_cmr_flag=False,
     debug=False,

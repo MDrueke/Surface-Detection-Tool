@@ -212,3 +212,8 @@ __marimo__/
 # Project-specific
 load_debug.py
 SURFACE_DETECTION_IMPROVEMENT_PROPOSALS.md
+our_xfeats.npy
+ibl_xfeats.npy
+compare_feats.py
+_iblqc_channel_detection.png
+my_detection_plot.png

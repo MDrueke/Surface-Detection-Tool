@@ -2,5 +2,5 @@ numpy
 scipy
 matplotlib
 mtscomp
-neuropixel
-iblutil
+tqdm
+

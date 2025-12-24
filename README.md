@@ -6,11 +6,11 @@ The channel quality detection algorithms (dead, noisy, and outside channel detec
 
 ## Overview
 
-This tool detects the brain surface and identifies bad channels in Neuropixel electrophysiology recordings. It processes SpikeGLX binary files (.bin or .cbin) and provides an interactive visualization for manual verification and adjustment of the detected surface channel.
+This tool detects the brain surface and bad channels in Neuropixel recordings (SpikeGLX .bin/.cbin). It provides an automated estimate alongside an interactive visualization, allowing users to verify and adjust the surface channel based on signal features. It makes some informed guesses about the surface location, but the script is mainly meant to provide the user with useful information to make an informed decision about the surface channel.
 
 The tool analyzes recordings to classify channels as:
 - **Dead channels**: Low signal correlation, likely non-functional
-- **Noisy channels**: High-frequency power or excessive correlation, indicating noise
+- **Noisy channels**: High-frequency (>80% Nyquist) power or excessive correlation, indicating noise
 - **Outside channels**: Channels above the brain surface (in air/saline)
 
 ![Surface Detection Example](example.png)
@@ -54,12 +54,6 @@ Specify the file path and options directly:
 python main.py /path/to/recording.ap.bin [OPTIONS]
 ```
 
-Or use the `--bin_file` flag:
-
-```bash
-python main.py --bin_file /path/to/recording.ap.bin [OPTIONS]
-```
-
 ### Command Line Options
 
 **File input:**
@@ -69,24 +63,19 @@ python main.py --bin_file /path/to/recording.ap.bin [OPTIONS]
 - `--cmr` - Apply Common Median Referencing to data before running detection algorithms
 - `--hf FREQUENCY` - Apply highpass filter (Hz) to data before detection (e.g., `--hf 300`)
 - `--n_chunks N` - Number of time chunks to analyze (default: 20)
-- `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (default: -5.0)
+- `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (Median Absolute Deviation, default: -5.0)
 
 **Debug options:**
 - `--debug` - Enable debug mode: prints detailed detection info and saves intermediate data to .npy files
 
 ### Examples
 
-**Basic usage with GUI:**
+**Basic usage with file dialog:**
 ```bash
 python main.py
 ```
 
-**Command line with Common Median Referencing:**
-```bash
-python main.py recording.ap.bin --cmr
-```
-
-**With preprocessing and custom parameters:**
+**Command line with preprocessing and custom parameters:**
 ```bash
 python main.py recording.ap.bin --cmr --hf 300 --n_chunks 30 --spike_threshold -4.5
 ```
@@ -105,21 +94,22 @@ The interactive visualization includes checkboxes for CMR and highpass filtering
 ## Interactive Plot
 
 The visualization shows:
-- **Dead channels**: Channels with low high-frequency coherence (blue)
-- **Noisy channels**: Channels with high power or correlation (red/orange)  
-- **Outside channels**: Channels detected above the brain surface (yellow/green)
-- **Voltage heatmap**: Raw voltage snippet with optional filtering
+- **Dead channels**: Low signal correlation (blue)
+- **Noisy channels**: High high-frequency power (red)
+- **Outside channels**: Low low-frequency coherence (green)
+- **LF Power**: Power < 100 Hz
+- **Gamma Power**: Power 40-100 Hz (can be useful to identify cortex)
+- **Spike Amplitude**: Median amplitude of multi-unit activity (useful to identify cortical layers)
 - **Firing rate**: Spike activity across channels
+- **Voltage heatmap**: Raw voltage snippet with optional filtering
 
 **Interaction:**
 - Click on any subplot to manually select a different surface channel
 - Hover over the plots to see channel numbers and values in the bottom-left corner
 
-The tool saves the final selection to a `.surface_channel.txt` file next to the input file.
-
 ## Multi-Shank Support
 
-For multi-shank probes (e.g., Neuropixels 2.0), the tool automatically detects shanks and processes each independently. Each shank gets its own interactive plot and surface channel output.
+For multi-shank probes (e.g., Neuropixels 2.0), the tool automatically detects shanks and processes each independently, sequentially. Each shank gets its own interactive plot and surface channel output.
 
 ## Output
 

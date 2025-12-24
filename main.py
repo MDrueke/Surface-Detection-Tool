@@ -31,6 +31,13 @@ def get_options_dialog(cmr_default=False, hf_default=None):
     options_window = tk.Tk()
     options_window.title("Options")
     options_window.geometry("350x180")
+    
+    # Apply Dark Theme
+    bg_color = "#323232"
+    fg_color = "white"
+    active_bg = "#505050"
+    
+    options_window.configure(bg=bg_color)
 
     # Center the window
     options_window.eval("tk::PlaceWindow . center")
@@ -44,11 +51,16 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         text="Apply Common Median Referencing (CMR)",
         variable=cmr_var,
         font=("Arial", 10),
+        bg=bg_color,
+        fg=fg_color,
+        selectcolor="black", # Checkbox tick background
+        activebackground=bg_color,
+        activeforeground=fg_color
     )
     cmr_checkbox.pack(pady=(20, 10))
 
     # Highpass filter entry
-    hf_frame = tk.Frame(options_window)
+    hf_frame = tk.Frame(options_window, bg=bg_color)
     hf_frame.pack(pady=10)
 
     hf_label = tk.Label(
@@ -56,10 +68,12 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         text="Heatmap Highpass Cutoff (Hz):\n(empty = disabled)",
         font=("Arial", 10),
         justify=tk.LEFT,
+        bg=bg_color,
+        fg=fg_color
     )
     hf_label.pack(side=tk.LEFT, padx=(0, 10))
 
-    hf_entry = tk.Entry(hf_frame, width=10, font=("Arial", 10))
+    hf_entry = tk.Entry(hf_frame, width=10, font=("Arial", 10), bg="#505050", fg="white", insertbackground="white")
     hf_entry.pack(side=tk.LEFT)
     if hf_default is not None:
         hf_entry.insert(0, str(hf_default))
@@ -95,13 +109,14 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         options_window.destroy()
 
     # Buttons frame
-    button_frame = tk.Frame(options_window)
+    button_frame = tk.Frame(options_window, bg=bg_color)
     button_frame.pack(pady=10)
 
-    ok_button = tk.Button(button_frame, text="OK", command=on_ok, width=10)
+    # Style Buttons (limited on macOS without ttk, but we can set highlights)
+    ok_button = tk.Button(button_frame, text="OK", command=on_ok, width=10, highlightbackground=bg_color)
     ok_button.pack(side=tk.LEFT, padx=5)
 
-    cancel_button = tk.Button(button_frame, text="Cancel", command=on_cancel, width=10)
+    cancel_button = tk.Button(button_frame, text="Cancel", command=on_cancel, width=10, highlightbackground=bg_color)
     cancel_button.pack(side=tk.LEFT, padx=5)
 
     options_window.mainloop()
@@ -270,8 +285,8 @@ def main():
         xfeats["xcor_lf"] = scipy.signal.medfilt(xfeats["xcor_lf"], 11)
 
         # Compute firing rates across all channels
-        print("Computing firing rates...")
-        firing_rates = compute_firing_rates(
+        print("Computing firing rates and spike amplitudes...")
+        firing_rates, spike_amplitudes = compute_firing_rates(
             sr, n_batches=options["n_chunks"], threshold=options["spike_threshold"]
         )
         print(
@@ -311,6 +326,7 @@ def main():
                 auto_surface_channel,
                 bin_path,
                 firing_rates=firing_rates,
+                spike_amplitudes=spike_amplitudes,
                 hf_cutoff=options["hf_cutoff"],
             )
 
@@ -337,8 +353,9 @@ def main():
                     raw, channel_labels, xfeats, shank_channels
                 )
 
-                # Filter firing rates for this shank
+                # Filter firing rates and spike amplitudes for this shank
                 firing_rates_shank = firing_rates[shank_channels]
+                spike_amplitudes_shank = spike_amplitudes[shank_channels]
 
                 # Find auto-detected surface for this shank
                 auto_surface_local = find_surface_channel(labels_shank)
@@ -363,6 +380,7 @@ def main():
                     auto_surface_abs,
                     bin_path,
                     firing_rates=firing_rates_shank,
+                    spike_amplitudes=spike_amplitudes_shank,
                     shank_id=shank_id,
                     total_shanks=num_shanks,
                     shank_channels=shank_channels,

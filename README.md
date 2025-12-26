@@ -11,6 +11,8 @@ The tool analyzes recordings to classify channels as:
 
 The tool is currently limited to data acquired with SpikeGLX. Contact me if you would like me to adapt it to data acquired with OpenEphys.
 
+![Surface Detection Example](example.png)
+
 ## Requirements
 
 ```bash

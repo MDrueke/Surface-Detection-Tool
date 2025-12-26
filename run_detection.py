@@ -1,399 +1,295 @@
 import numpy as np
 import scipy.signal
 import scipy.stats
+import scipy.fft
 
 from reader import Reader
 
+LF_CUTOFF_HZ = 10       
+GAMMA_FREQ_RANGE = (60, 100) 
+
 
 def rms(x, axis=-1):
-    """
-    Root mean square of array along axis
-
-    :param x: array on which to compute RMS
-    :param axis: (optional, -1)
-    :return: numpy array
-    """
     return np.sqrt(np.mean(x**2, axis=axis))
 
 
 def apply_cmr(raw):
+    median_trace = np.median(raw, axis=0)
+    return raw - median_trace[np.newaxis, :]
+
+
+def detrend(x, nmed):
     """
-    Apply Common Median Referencing to raw data.
-
-    For each time sample, subtract the median across all channels.
-
-    :param raw: Raw data array [nc, ns]
-    :return: CMR-applied data [nc, ns]
+    Subtract the trend from a vector
+    The trend is a median filtered version of the said vector with tapering
     """
-    median_trace = np.median(
-        raw, axis=0
-    )  # [ns] - median across channels at each time point
-    return raw - median_trace[np.newaxis, :]  # subtract from all channels
+    ntap = int(np.ceil(nmed / 2))
+    xf = np.r_[np.zeros(ntap) + x[0], x, np.zeros(ntap) + x[-1]]
+    xf = scipy.signal.medfilt(xf, nmed)[ntap:-ntap]
+    return x - xf
 
 
-def detect_bad_channels(
-    raw,
-    fs,
-    similarity_threshold=(-0.5, 1),
-    psd_hf_threshold=None,
-    display=False,
+def channels_similarity(raw, nmed=0):
+    """
+    Computes the similarity based on zero-lag crosscorrelation of each channel with the median trace
+    """
+    def fxcor(x, y):
+        return scipy.fft.irfft(
+            scipy.fft.rfft(x) * np.conj(scipy.fft.rfft(y)), n=raw.shape[-1]
+        )
+
+    def nxcor(x, ref):
+        ref = ref - np.mean(ref)
+        apeak = fxcor(ref, ref)[0]
+        x = x - np.mean(x, axis=-1)[:, np.newaxis]  # remove dc component
+        return fxcor(x, ref)[:, 0] / apeak
+
+    ref = np.median(raw, axis=0)
+    xcor = nxcor(raw, ref)
+
+    if nmed > 0:
+        xcor = detrend(xcor, nmed) + 1
+    return xcor
+
+
+def analyze_recording(
+    bin_file,
+    n_batches=20,
+    batch_duration=0.4,
+    spike_threshold=-5.0,
     apply_cmr_flag=False,
     debug=False,
-    verbose=True,
+    time_slice=None,
 ):
     """
-    Bad channels detection for Neuropixel probes
-    Labels channels
-     0: all clear
-     1: dead low coherence / amplitude
-     2: noisy
-     3: outside of the brain
-    :param raw: [nc, ns]
-    :param fs: sampling frequency
-    :param similarity_threshold:
-    :param psd_hf_threshold:
-    :param display: optinal (False) will show a plot of features alongside a raw data snippet
-    :return: labels (numpy vector [nc]), xfeats: dictionary of features [nc]
+    Unified analysis function.
+    
+    :param time_slice: Optional tuple ("seconds"|"proportion", start, end). 
+                       Restricts analysis to this time window.
+    :return: channel_flags, xfeats_median, raw_best_chunk, fs, firing_rates, spike_amplitudes
     """
-
-    # def detect_and_fix_flipped_lf_coherence(xcor_lf, nc):
-    #     """
-    #     Detect if LF coherence is flipped (due to tip reference instead of external reference).
-    #
-    #     Normal: xcor_lf is HIGH at bottom (brain), LOW at top (outside brain)
-    #     Flipped: xcor_lf is LOW at bottom, HIGH at top
-    #
-    #     If flipped, return -1 * xcor_lf to correct it.
-    #
-    #     :param xcor_lf: LF coherence feature array [nc]
-    #     :param nc: number of channels
-    #     :return: corrected xcor_lf
-    #     """
-    #     # Calculate medians of bottom 20% and top 20% of channels
-    #     bottom_20_idx = int(nc * 0.2)
-    #     top_20_idx = int(nc * 0.8)
-    #
-    #     median_bottom = np.median(xcor_lf[:bottom_20_idx])
-    #     median_top = np.median(xcor_lf[top_20_idx:])
-    #
-    #     # If top > bottom, the signal is flipped
-    #     if median_top > median_bottom:
-    #         print("Detected flipped LF coherence (likely tip reference). Correcting...")
-    #         return -1 * xcor_lf
-    #
-    #     return xcor_lf
-
-    def detrend(x, nmed):
-        """
-        Subtract the trend from a vector
-        The trend is a median filtered version of the said vector with tapering
-        :param x: input vector
-        :param nmed: number of points of the median filter
-        :return: np.array
-        """
-        ntap = int(np.ceil(nmed / 2))
-        xf = np.r_[np.zeros(ntap) + x[0], x, np.zeros(ntap) + x[-1]]
-        # assert np.all(xcorf[ntap:-ntap] == xcor)
-        xf = scipy.signal.medfilt(xf, nmed)[ntap:-ntap]
-        return x - xf
-
-    def channels_similarity(raw, nmed=0):
-        """
-        Computes the similarity based on zero-lag crosscorrelation of each channel with the median
-        trace referencing
-        :param raw: [nc, ns]
-        :param nmed:
-        :return:
-        """
-
-        def fxcor(x, y):
-            return scipy.fft.irfft(
-                scipy.fft.rfft(x) * np.conj(scipy.fft.rfft(y)), n=raw.shape[-1]
-            )
-
-        def nxcor(x, ref):
-            ref = ref - np.mean(ref)
-            apeak = fxcor(ref, ref)[0]
-            x = x - np.mean(x, axis=-1)[:, np.newaxis]  # remove DC component
-            return fxcor(x, ref)[:, 0] / apeak
-
-        ref = np.median(raw, axis=0)
-        xcor = nxcor(raw, ref)
-
-        if nmed > 0:
-            xcor = detrend(xcor, nmed) + 1
-        return xcor
-
-    nc, _ = raw.shape
-    raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]  # removes DC offset
-    # Apply CMR if requested
-    if apply_cmr_flag:
-        raw = apply_cmr(raw)
-    xcor = channels_similarity(raw)
-    # Compute PSD using Welch's method
-    # Use nperseg equal to the number of samples (or a large enough value) 
-    # to maintain sufficient frequency resolution. Default nperseg=256 gives ~117Hz res at 30kHz!
-    n_samples = raw.shape[-1]
-    fscale, psd = scipy.signal.welch(raw * 1e6, fs=fs, nperseg=n_samples)  # units; uV ** 2 / Hz
-    # auto-detection of the band with which we are working
-    band = "ap" if fs > 2600 else "lf"
-    # the LFP band data is obviously much stronger so auto-adjust the default threshold
-    if band == "ap":
-        psd_hf_threshold = 0.02 if psd_hf_threshold is None else psd_hf_threshold
-        filter_kwargs = {"N": 3, "Wn": 300 / fs * 2, "btype": "highpass"}
-    elif band == "lf":
-        psd_hf_threshold = 1.4 if psd_hf_threshold is None else psd_hf_threshold
-        psd_hf_threshold = 1.4 if psd_hf_threshold is None else psd_hf_threshold
-        filter_kwargs = {"N": 3, "Wn": 1 / fs * 2, "btype": "highpass"}
-    sos_hp = scipy.signal.butter(**filter_kwargs, output="sos")
-    hf = scipy.signal.sosfiltfilt(sos_hp, raw)
-    xcorf = channels_similarity(hf)
-
-    # LF Power (0-100 Hz)
-    sos_lp = scipy.signal.butter(N=3, Wn=100 / fs * 2, btype="lowpass", output="sos")
-    lf = scipy.signal.sosfiltfilt(sos_lp, raw)
-    rms_lf = rms(lf)
-
-    # Gamma / HF Power (40-100 Hz)
-    # psd is [nc, n_freqs], fscale is [n_freqs]
-    # mask for 40-100 Hz
-    mask_gamma = (fscale >= 40) & (fscale <= 100)
-    # Mean power in gamma band
-    if np.sum(mask_gamma) > 0:
-        power_gamma = np.mean(psd[:, mask_gamma], axis=-1)
-    else:
-        power_gamma = np.zeros(nc)
-
-    xfeats = {
-        "ind": np.arange(nc),
-        "rms_raw": rms(raw),  # very similar to the rms avfter butterworth filter
-        "rms_lf": rms_lf,
-        "power_gamma": power_gamma,
-        "xcor_hf": detrend(xcor, 11),
-        "xcor_lf": xcorf - detrend(xcorf, 11) - 1,
-        "psd_hf": np.mean(psd[:, fscale > (fs / 2 * 0.8)], axis=-1),  # 80% nyquists
-    }
-
-    # Detect and correct flipped LF coherence (due to tip reference)
-    # NOTE: This detection doesn't work as expected - commented out for now
-    # xfeats["xcor_lf"] = detect_and_fix_flipped_lf_coherence(xfeats["xcor_lf"], nc)
-
-    # make recommendation
-    ichannels = np.zeros(nc)
-    idead = np.where(similarity_threshold[0] > xfeats["xcor_hf"])[0]
-    inoisy = np.where(
-        np.logical_or(
-            xfeats["psd_hf"] > psd_hf_threshold,
-            xfeats["xcor_hf"] > similarity_threshold[1],
-        )
-    )[0]
-    # the channels outside of the brains are the contiguous channels below the threshold on the trend coherency
-
-    signal_noisy = xfeats["xcor_lf"]
-    # Filter signal
-    window_size = 25  # Choose based on desired smoothing (e.g., 25 samples)
-    kernel = np.ones(window_size) / window_size
-    # Apply convolution
-    signal_filtered = np.convolve(signal_noisy, kernel, mode="same")
-
-    diff_x = np.diff(signal_filtered)
-    indx = np.where(diff_x < -0.02)[0]  # hardcoded threshold
-    if indx.size > 0:
-        indx_threshold = np.floor(np.median(indx)).astype(int)
-        threshold = signal_noisy[indx_threshold]
-        ioutside = np.where(signal_noisy < threshold)[0]
-        if verbose:
-            print(
-                f"LF coherence threshold computed: {threshold:.4f} at channel {indx_threshold}"
-            )
-        if debug:
-            print(
-                f"  Found {len(indx)} channels with sharp gradient drops (diff < -0.02)"
-            )
-            print(f"  Gradient drop channels: {indx}")
-            print(f"  Using median index: {indx_threshold}")
-    else:
-        ioutside = np.array([])
-        threshold = None
-        if verbose:
-            print(
-                "LF coherence threshold: No sharp gradient drops detected (no surface found)"
-            )
-        if debug:
-            print(f"  Min gradient value: {np.min(diff_x):.4f}")
-            print(f"  Gradient threshold used: -0.02")
-
-    if ioutside.size > 0 and ioutside[-1] == (nc - 1):
-        a = np.cumsum(np.r_[0, np.diff(ioutside) - 1])
-        ioutside = ioutside[a == np.max(a)]
-        ichannels[ioutside] = 3
-
-    # indices
-    ichannels[idead] = 1
-    ichannels[inoisy] = 2
-
-    # Store debug information if requested
-    if debug:
-        xfeats["debug"] = {
-            "signal_noisy": signal_noisy,
-            "signal_filtered": signal_filtered,
-            "diff_x": diff_x,
-            "gradient_threshold": -0.02,
-            "lf_threshold": threshold,
-            "lf_threshold_channel": indx_threshold if indx.size > 0 else None,
-            "gradient_drop_indices": indx,
-        }
-
-    return ichannels, xfeats
-
-
-def compute_firing_rates(sr, n_batches=20, batch_duration=0.4, threshold=-5.0):
-    """
-    Compute firing rates for all channels across multiple time chunks.
-    Always applies highpass filtering and CMR for spike detection.
-
-    :param sr: Reader object
-    :param n_batches: number of time chunks to analyze
-    :param batch_duration: duration of each chunk in seconds
-    :param threshold: spike detection threshold in multiples of MAD (default: -5.0)
-    :return: firing_rates: array of firing rates (spikes/sec) per channel [nc]
-             spike_amplitudes: array of median spike amplitudes (uV/mad-units) per channel [nc]
-    """
+    sr = bin_file if isinstance(bin_file, Reader) else Reader(bin_file)
     nc = sr.nc - sr.nsync
+    fs = sr.fs
+    
+    # pre-calculate filter coefficients
+    sos_hp = scipy.signal.butter(N=3, Wn=300 / fs * 2, btype="highpass", output="sos")
+    sos_lp = scipy.signal.butter(N=3, Wn=LF_CUTOFF_HZ / fs * 2, btype="lowpass", output="sos")
+    
+    xfeats_accumulator = {}
+    chunk_median_frs = [] 
+    
     total_spikes = np.zeros(nc)
     total_duration = 0
-    
-    # Store all amplitudes to compute median later
-    # List of lists? or just accumulate and take median at the end?
-    # Since we process in batches, we can't easily take global median without storing all spikes.
-    # Storing all spikes might be heavy if very long recording.
-    # Compromise: Store list of amplitudes per channel
     all_amplitudes = [[] for _ in range(nc)]
+    
+    channel_labels_all = np.zeros((nc, n_batches))
+    
+    best_chunk_raw = None
+    max_chunk_median_fr = -1.0
+    
+    # determine time range
+    t_start_abs = 0
+    t_end_abs = sr.rl
+    
+    if time_slice:
+        mode, t1, t2 = time_slice
+        if mode == "proportion":
+            t_start_abs = t1 * sr.rl
+            t_end_abs = t2 * sr.rl
+        else: # seconds
+            t_start_abs = t1
+            t_end_abs = t2
+            
+    t_start_abs = max(0, min(t_start_abs, sr.rl))
+    t_end_abs = max(0, min(t_end_abs, sr.rl))
+    
+    if t_end_abs <= t_start_abs:
+         print(f"Warning: Invalid time slice {t_start_abs}-{t_end_abs}. Using full duration.")
+         t_start_abs = 0
+         t_end_abs = sr.rl
 
-    # Highpass filter for spike detection (300 Hz for AP band)
-    fs = sr.fs
-    sos_hp = scipy.signal.butter(N=3, Wn=300 / fs * 2, btype="highpass", output="sos")
-
-    for i, t0 in enumerate(np.linspace(0, sr.rl - batch_duration, n_batches)):
+    scan_end = max(t_start_abs, t_end_abs - batch_duration)
+    
+    print(f"Analyzing {n_batches} chunks of {batch_duration}s in range {t_start_abs:.1f}-{t_end_abs:.1f}s...")
+    
+    chunk_starts = np.linspace(t_start_abs, scan_end, n_batches)
+    
+    for i, t0 in enumerate(chunk_starts):
         sl = slice(int(t0 * fs), int((t0 + batch_duration) * fs))
-        raw = sr[sl, :nc].T  # [nc, ns]
-
-        # Remove DC offset
+        raw = sr[sl, :nc].T 
+        
         raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
-
-        # Apply CMR
-        raw = apply_cmr(raw)
-
-        # Apply highpass filter
-        raw_hp = scipy.signal.sosfiltfilt(sos_hp, raw, axis=1)
-
-        # Compute threshold per channel: threshold * MAD (Median Absolute Deviation)
-        # MAD is robust to outliers
-        mad = np.median(np.abs(raw_hp), axis=1)
-        thresholds = threshold * mad
-
-        # Count threshold crossings (spikes)
+        
+        # --- data streams ---
+        # 1. activity stream (strictly cmr + hp)
+        raw_cmr = apply_cmr(raw)
+        hf_activity = scipy.signal.sosfiltfilt(sos_hp, raw_cmr, axis=1) 
+        
+        # 2. gamma stream (strictly cmr, broadband)
+        
+        # 3. noise stream (strictly raw)
+        hf_noise = scipy.signal.sosfiltfilt(sos_hp, raw, axis=1) 
+        
+        # 4. feature/plot stream (configurable)
+        if apply_cmr_flag:
+            raw_features = raw_cmr
+            hf_features = hf_activity 
+        else:
+            raw_features = raw
+            hf_features = hf_noise 
+            
+        lf_features = scipy.signal.sosfiltfilt(sos_lp, raw_features, axis=1)
+        
+        
+        # --- calculation ---
+        
+        # spikes / activity
+        mad = np.median(np.abs(hf_activity), axis=1)
+        thresholds = spike_threshold * mad
+        
+        chunk_spikes = np.zeros(nc)
+        
         for ch in range(nc):
-            # Find negative threshold crossings
-            crossings = np.where(raw_hp[ch, :] < thresholds[ch])[0]
+            # find negative threshold crossings
+            crossings = np.where(hf_activity[ch, :] < thresholds[ch])[0]
             if len(crossings) > 0:
-                # Remove duplicates within refractory period (1 ms = fs/1000 samples)
                 refractory_samples = int(fs / 1000)
                 diff = np.diff(crossings)
                 valid = np.r_[True, diff > refractory_samples]
-                total_spikes[ch] += np.sum(valid)
                 
-                # Collect amplitudes of valid spikes
-                # crossings[valid] gives indices
-                # We want the amplitude at the crossing (or better, the peak near crossing?)
-                # For simplicity and speed, let's take the value at the crossing (which is < threshold)
-                # Or find the minimum in a small window.
-                # Let's just take the value at crossing or the minimum in next few samples.
-                # Simple approach: Minimum value in 1ms window after crossing
+                num_valid = np.sum(valid)
+                total_spikes[ch] += num_valid
+                chunk_spikes[ch] = num_valid
+                
+                # collect amplitudes
                 for idx in crossings[valid]:
-                     # Check bounds
-                     end_search = min(idx + int(fs/1000), raw_hp.shape[1])
+                     end_search = min(idx + int(fs/1000), hf_activity.shape[1])
                      if end_search > idx:
-                         # Spikes are negative
-                         amp = np.min(raw_hp[ch, idx:end_search])
+                         amp = np.min(hf_activity[ch, idx:end_search])
                          all_amplitudes[ch].append(amp)
                      else:
-                         all_amplitudes[ch].append(raw_hp[ch, idx])
+                         all_amplitudes[ch].append(hf_activity[ch, idx])
 
         total_duration += batch_duration
+        current_chunk_median_fr = np.median(chunk_spikes / batch_duration)
+        chunk_median_frs.append(current_chunk_median_fr)
+        
+        # choose best chunk (based on activity)
+        if current_chunk_median_fr > max_chunk_median_fr:
+            max_chunk_median_fr = current_chunk_median_fr
+            best_chunk_raw = raw_features.copy() 
+        
+        
+        # features
+        n_samples = raw.shape[-1]
+        fscale, psd_cmr = scipy.signal.welch(raw_cmr * 1e6, fs=fs, nperseg=n_samples)
+        
+        mask_gamma = (fscale >= GAMMA_FREQ_RANGE[0]) & (fscale <= GAMMA_FREQ_RANGE[1])
+        if np.sum(mask_gamma) > 0:
+            power_gamma = np.mean(psd_cmr[:, mask_gamma], axis=-1)
+        else:
+            power_gamma = np.zeros(nc)
+            
+        # noisy/dead detection (using raw / hf_noise)
+        xcor_raw = channels_similarity(raw)
+        xcor_hf_val = detrend(xcor_raw, 11)
+        
+        fscale_raw, psd_raw = scipy.signal.welch(raw * 1e6, fs=fs, nperseg=n_samples)
+        psd_hf_threshold = 0.02 
+        psd_hf_val = np.mean(psd_raw[:, fscale_raw > (fs / 2 * 0.8)], axis=-1)
+        
+        # surface detection (using configurable streams)
+        xcorf_features = channels_similarity(hf_features)
+        xcor_lf_val = xcorf_features - detrend(xcorf_features, 11) - 1
+        
+        # mav (activity - strictly preprocessed)
+        mean_abs_volt = np.mean(np.abs(hf_activity), axis=-1)
+        
+        chunk_xfeats = {
+            "ind": np.arange(nc),
+            "rms_raw": rms(raw_features),
+            "rms_lf": rms(lf_features),
+            "power_gamma": power_gamma,     
+            "xcor_hf": xcor_hf_val,         
+            "xcor_lf": xcor_lf_val,         
+            "psd_hf": psd_hf_val,           
+            "mean_abs_volt": mean_abs_volt, 
+        }
+        
+        if not xfeats_accumulator:
+            for k in chunk_xfeats.keys():
+                 xfeats_accumulator[k] = []
+        for k, v in chunk_xfeats.items():
+            xfeats_accumulator[k].append(v)
+            
+        # detect bad channels (per chunk)
+        similarity_threshold=(-0.5, 1) 
+        
+        idead = np.where(similarity_threshold[0] > chunk_xfeats["xcor_hf"])[0]
+        inoisy = np.where(
+            np.logical_or(
+                chunk_xfeats["psd_hf"] > psd_hf_threshold,
+                chunk_xfeats["xcor_hf"] > similarity_threshold[1],
+            )
+        )[0]
+        
+        # outside brain detection (gradient of lf coherence)
+        signal_noisy = chunk_xfeats["xcor_lf"]
+        window_size = 25
+        kernel = np.ones(window_size) / window_size
+        signal_filtered = np.convolve(signal_noisy, kernel, mode="same")
+        diff_x = np.diff(signal_filtered)
+        indx = np.where(diff_x < -0.02)[0]
+        
+        ichannels = np.zeros(nc)
+        if indx.size > 0:
+            indx_threshold = np.floor(np.median(indx)).astype(int)
+            threshold_val = signal_noisy[indx_threshold]
+            ioutside = np.where(signal_noisy < threshold_val)[0]
+             # check contiguity at top
+            if ioutside.size > 0 and ioutside[-1] == (nc - 1):
+                a = np.cumsum(np.r_[0, np.diff(ioutside) - 1])
+                ioutside = ioutside[a == np.max(a)]
+                ichannels[ioutside] = 3
+        
+        ichannels[idead] = 1
+        ichannels[inoisy] = 2
+        
+        channel_labels_all[:, i] = ichannels
+        
+        if debug and i == n_batches - 1:
+            print(f"Debug (Chunk {i}):")
+            if indx.size > 0:
+                print(f"  Gradient drops: {len(indx)}")
+            else:
+                 print("  No gradient drops.")
 
-    # Compute firing rates (spikes per second)
+
+    
+    # aggregation
+    
     firing_rates = total_spikes / total_duration
     
-    # Compute median spike amplitude
     spike_amplitudes = np.zeros(nc)
     for ch in range(nc):
         if len(all_amplitudes[ch]) > 0:
             spike_amplitudes[ch] = np.median(all_amplitudes[ch])
         else:
-            spike_amplitudes[ch] = 0 # No spikes
+            spike_amplitudes[ch] = 0
 
-    return firing_rates, spike_amplitudes
-
-
-def detect_bad_channels_cbin(
-    bin_file,
-    n_batches=20,
-    batch_duration=0.4,
-    display=False,
-    apply_cmr_flag=False,
-    debug=False,
-):
-    """
-    Runs a ap-binary file scan to automatically detect faulty channels
-    :param bin_file: full file path to the binary or compressed binary file from spikeglx
-    :param n_batches: number of batches throughout the file (defaults to 20)
-    :param batch_duration: batch length in seconds, defaults to 0.3
-    :param display: if True will return a figure with features and an excerpt of the raw data
-    :param apply_cmr_flag: if True, apply Common Median Referencing to the data
-    :return: channel_labels: nc int array with 0:ok, 1:dead, 2:high noise, 3:outside of the brain
-    """
-    sr = bin_file if isinstance(bin_file, Reader) else Reader(bin_file)
-    nc = sr.nc - sr.nsync
-    channel_labels = np.zeros((nc, n_batches))
-    # loop over the file and take the mode of detections
-    for i, t0 in enumerate(np.linspace(0, sr.rl - batch_duration, n_batches)):
-        sl = slice(int(t0 * sr.fs), int((t0 + batch_duration) * sr.fs))
-        raw = sr[sl, :nc].T
-        # Only pass debug=True and verbose=True on the last batch to avoid spamming console
-        channel_labels[:, i], _xfeats = detect_bad_channels(
-            raw,
-            fs=sr.fs,
-            apply_cmr_flag=apply_cmr_flag,
-            debug=(debug and i == n_batches - 1),
-            verbose=(i == n_batches - 1),  # Only print threshold on last batch
-        )
-
-    # Aggregate the labels for robust detection
-    channel_flags, _ = scipy.stats.mode(channel_labels, axis=1)
-
-    # Flatten to 1D array (mode returns shape (nc, 1))
+    xfeats_median = {"ind": np.arange(nc)}
+    for k, v_list in xfeats_accumulator.items():
+        xfeats_median[k] = np.median(np.stack(v_list, axis=1), axis=1)
+        
+    channel_flags, _ = scipy.stats.mode(channel_labels_all, axis=1)
     channel_flags = channel_flags.flatten()
-
-    # Print summary of aggregated detection
+    
     num_outside = np.sum(channel_flags == 3)
     if num_outside > 0:
-        print(
-            f"Final aggregated detection: {num_outside} channels marked as outside brain"
-        )
-
-    # Apply CMR to the raw data for plotting if requested
-    # (The raw variable here is from the last chunk iteration)
-    if apply_cmr_flag:
-        # Remove DC offset first (same as in detect_bad_channels)
-        raw_plot = raw - np.mean(raw, axis=-1)[:, np.newaxis]
-        # Then apply CMR
-        raw_plot = apply_cmr(raw_plot)
-    else:
-        raw_plot = raw
-
-    # Return the robust labels, but the features and raw data from the LAST chunk for plotting
-    return channel_flags, _xfeats, raw_plot, sr.fs
+        print(f"Final aggregated detection: {num_outside} channels marked as outside brain")
+        
+    return channel_flags, xfeats_median, best_chunk_raw, fs, firing_rates, spike_amplitudes
 
 
 def find_surface_channel(channel_labels):
@@ -409,31 +305,24 @@ def find_surface_channel(channel_labels):
     """
     nc = len(channel_labels)
 
-    # Find all channels labeled as "outside brain"
+    # find all channels labeled as "outside brain"
     outside_channels = np.where(channel_labels == 3)[0]
 
     if len(outside_channels) == 0:
-        # No surface detected - return -1
         return -1
 
-    # Check if the highest channel is in the outside group
-    # (ensures we're looking at the top block, not a disconnected block lower down)
+    # check if the highest channel is in the outside group
     if outside_channels[-1] != nc - 1:
-        # The outside channels don't extend to the top - might be a disconnected block
-        # Return -1 as fallback
         return -1
 
-    # Find the contiguous block at the top by checking for gaps
-    # Start from the highest channel and work down
+    # find the contiguous block at the top
     top_block = [outside_channels[-1]]
     for i in range(len(outside_channels) - 2, -1, -1):
         if outside_channels[i] == top_block[0] - 1:
             top_block.insert(0, outside_channels[i])
         else:
-            # Found a gap - stop here
             break
 
-    # Return the lowest channel in the top block (the brain surface)
     return top_block[0]
 
 
@@ -451,7 +340,6 @@ def get_shank_info(geometry):
     shank_channels = {}
 
     for shank_id in shank_ids:
-        # Get indices of channels belonging to this shank
         channels = np.where(geometry["shank"] == shank_id)[0]
         shank_channels[int(shank_id)] = channels
 
@@ -468,17 +356,12 @@ def filter_data_by_shank(raw, channel_labels, xfeats, shank_channels):
     :param shank_channels: Array of channel indices for this shank
     :return: Filtered raw, channel_labels, xfeats
     """
-    # Filter raw data
     raw_shank = raw[shank_channels, :]
-
-    # Filter channel labels
     labels_shank = channel_labels[shank_channels]
 
-    # Filter features
     xfeats_shank = {}
     for key, val in xfeats.items():
         if key == "ind":
-            # Keep original indices for reference
             xfeats_shank[key] = val[shank_channels]
         else:
             xfeats_shank[key] = val[shank_channels]

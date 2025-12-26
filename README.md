@@ -1,23 +1,17 @@
 # Surface Detection for Neuropixel Recordings
 
-## Attribution
-
-The channel quality detection algorithms (dead, noisy, and outside channel detection) used in this tool are derived from the [IBL sorter pipeline](https://github.com/int-brain-lab/ibl-sorter). The pipeline is described in the International Brain Laboratory's technical documentation: [https://doi.org/10.6084/m9.figshare.19705522.v4](https://doi.org/10.6084/m9.figshare.19705522.v4).
-
 ## Overview
 
-This tool detects the brain surface and bad channels in Neuropixel recordings (SpikeGLX .bin/.cbin). It provides an automated estimate alongside an interactive visualization, allowing users to verify and adjust the surface channel based on signal features. It makes some informed guesses about the surface location, but the script is mainly meant to provide the user with useful information to make an informed decision about the surface channel.
+This tool detects the brain surface and bad channels in Neuropixel recordings (SpikeGLX .bin/.cbin). The surface, noisy channel and dead channel detection is based on code that's part of the ibl sorter repository found here: https://github.com/int-brain-lab/ibl-sorter. It provides an automated estimate alongside an interactive visualization, allowing users to verify and adjust the surface channel based on signal features. 
 
 The tool analyzes recordings to classify channels as:
-- **Dead channels**: Low signal correlation, likely non-functional
-- **Noisy channels**: High-frequency (>80% Nyquist) power or excessive correlation, indicating noise
+- **Dead channels**: Low signal correlation
+- **Noisy channels**: High-frequency (>80% Nyquist) power or excessive correlation
 - **Outside channels**: Channels above the brain surface (in air/saline)
 
-![Surface Detection Example](example.png)
+The tool is currently limited to data acquired with SpikeGLX. Contact me if you would like me to adapt it to data acquired with OpenEphys.
 
 ## Requirements
-
-Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -28,12 +22,10 @@ Required packages:
 - scipy
 - matplotlib
 - mtscomp (for reading .cbin compressed files)
-- neuropixel
-- iblutil
 
 ## Usage
 
-### GUI Mode (Default)
+### GUI file picker
 
 Run without arguments to launch the file picker and options dialog:
 
@@ -41,14 +33,7 @@ Run without arguments to launch the file picker and options dialog:
 python main.py
 ```
 
-This opens:
-1. A file selection dialog to choose your .bin or .cbin file
-2. An options dialog to configure preprocessing settings
-3. An interactive plot for reviewing and adjusting the detected surface channel
-
 ### Command Line Mode
-
-Specify the file path and options directly:
 
 ```bash
 python main.py /path/to/recording.ap.bin [OPTIONS]
@@ -63,56 +48,50 @@ python main.py /path/to/recording.ap.bin [OPTIONS]
 - `--cmr` - Apply Common Median Referencing to data before running detection algorithms
 - `--hf FREQUENCY` - Apply highpass filter (Hz) to data before detection (e.g., `--hf 300`)
 - `--n_chunks N` - Number of time chunks to analyze (default: 20)
-- `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (Median Absolute Deviation, default: -5.0)
+- `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (default: -6.0)
+- `-t` or `--time_slice START END` - Time window to analyze:
+    - **Proportions**: Use values <= 1.0 (e.g., `-t 0.0 0.1` for first 10%)
+    - **Seconds**: Use values > 1.0 (e.g., `-t 0 600` for first 10 minutes)
 
 **Debug options:**
-- `--debug` - Enable debug mode: prints detailed detection info and saves intermediate data to .npy files
+- `--debug` - Enable debug mode (prints info, saves intermediate .npy)
 
 ### Examples
 
-**Basic usage with file dialog:**
+**Basic usage:**
 ```bash
 python main.py
 ```
 
-**Command line with preprocessing and custom parameters:**
+**Analyze specific time window (0-600s) with common median referencing:**
 ```bash
-python main.py recording.ap.bin --cmr --hf 300 --n_chunks 30 --spike_threshold -4.5
+python main.py recording.ap.bin --cmr -t 0 600
 ```
 
-**Debug mode to save intermediate features:**
+**Debug mode:**
 ```bash
 python main.py recording.ap.bin --debug
 ```
 
-## Preprocessing Options
-
-The `--cmr` and `--hf` flags control the preprocessing applied to the data **before** the detection algorithms analyze it. These options affect which channels are classified as dead, noisy, or outside.
-
-The interactive visualization includes checkboxes for CMR and highpass filtering. These checkboxes **only change the displayed raw voltage snippet** and do not affect the channel detection results.
-
 ## Interactive Plot
 
-The visualization shows:
-- **Dead channels**: Low signal correlation (blue)
-- **Noisy channels**: High high-frequency power (red)
-- **Outside channels**: Low low-frequency coherence (green)
-- **LF Power**: Power < 100 Hz
-- **Gamma Power**: Power 40-100 Hz (can be useful to identify cortex)
-- **Spike Amplitude**: Median amplitude of multi-unit activity (useful to identify cortical layers)
-- **Firing rate**: Spike activity across channels
-- **Voltage heatmap**: Raw voltage snippet with optional filtering
+The visualization displays the following metrics for surface determination:
+
+1. **Dead Channels**: Channels with very low signal correlation (black stars = dead)
+2. **Noisy Channels**: Channels with excessive high-frequency noise (red stars = noisy)
+3. **Outside Brain**: Channels with low low-frequency coherence (green stars = outside)
+4. **Activity**: Firing rate in Hz (Gold line)
+5. **Mean Absolute Voltage (MAV)**: General signal magnitude (uV)
+6. **Gamma Power**: Power in 60-100 Hz band (useful for cortex identification)
+7. **Spike Amplitude**: Median amplitude of detected spikes
 
 **Interaction:**
-- Click on any subplot to manually select a different surface channel
-- Hover over the plots to see channel numbers and values in the bottom-left corner
-
-## Multi-Shank Support
-
-For multi-shank probes (e.g., Neuropixels 2.0), the tool automatically detects shanks and processes each independently, sequentially. Each shank gets its own interactive plot and surface channel output.
+- **Heatmap**: Shows raw voltage traces. Controls for CMR and Highpass (300Hz) are checked by default.
+- **Click**: Click on any plot to manually set the surface channel.
+- **Save**: "Save Surface Channel" writes the result to a text file.
 
 ## Output
 
 The tool saves:
-- `<filename>.surface_channel.txt` - The detected (or manually selected) surface channel number
-- `<filename>.debug.npy` - Debug data with detection features (if `--debug` flag is used)
+- `<filename>.surface_channel.txt` - The detected (or manually selected) surface channel number.
+- `<filename>.debug.npy` - (If `--debug`) Dictionary of computed features.

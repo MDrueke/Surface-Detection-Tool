@@ -12,8 +12,7 @@ sys.path.append(str(Path(__file__).parent))
 from plotting import show_channels_labels_interactive
 from reader import Reader
 from run_detection import (
-    compute_firing_rates,
-    detect_bad_channels_cbin,
+    analyze_recording,
     filter_data_by_shank,
     find_surface_channel,
     get_shank_info,
@@ -23,28 +22,19 @@ from run_detection import (
 def get_options_dialog(cmr_default=False, hf_default=None):
     """
     Show an options dialog to get processing options.
-
-    :param cmr_default: Default state of CMR checkbox
-    :param hf_default: Default highpass cutoff frequency (None = disabled)
-    :return: Dictionary with options {'cmr': bool, 'hf_cutoff': float or None}
     """
     options_window = tk.Tk()
     options_window.title("Options")
     options_window.geometry("350x180")
     
-    # Apply Dark Theme
     bg_color = "#323232"
     fg_color = "white"
-    active_bg = "#505050"
     
     options_window.configure(bg=bg_color)
-
-    # Center the window
     options_window.eval("tk::PlaceWindow . center")
 
     result = {"cmr": cmr_default, "hf_cutoff": hf_default, "confirmed": False}
 
-    # CMR checkbox
     cmr_var = tk.BooleanVar(value=cmr_default)
     cmr_checkbox = tk.Checkbutton(
         options_window,
@@ -53,13 +43,12 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         font=("Arial", 10),
         bg=bg_color,
         fg=fg_color,
-        selectcolor="black", # Checkbox tick background
+        selectcolor="black",
         activebackground=bg_color,
         activeforeground=fg_color
     )
     cmr_checkbox.pack(pady=(20, 10))
 
-    # Highpass filter entry
     hf_frame = tk.Frame(options_window, bg=bg_color)
     hf_frame.pack(pady=10)
 
@@ -81,7 +70,6 @@ def get_options_dialog(cmr_default=False, hf_default=None):
     def on_ok():
         result["cmr"] = cmr_var.get()
 
-        # Validate and parse highpass cutoff
         hf_text = hf_entry.get().strip()
         if hf_text == "":
             result["hf_cutoff"] = None
@@ -108,11 +96,9 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         result["confirmed"] = False
         options_window.destroy()
 
-    # Buttons frame
     button_frame = tk.Frame(options_window, bg=bg_color)
     button_frame.pack(pady=10)
 
-    # Style Buttons (limited on macOS without ttk, but we can set highlights)
     ok_button = tk.Button(button_frame, text="OK", command=on_ok, width=10, highlightbackground=bg_color)
     ok_button.pack(side=tk.LEFT, padx=5)
 
@@ -127,8 +113,6 @@ def get_options_dialog(cmr_default=False, hf_default=None):
 def get_bin_file_path_and_options():
     """
     Get the path to a .bin file and processing options either from command line or via dialogs.
-
-    :return: Tuple of (Path object to the .bin file, options dict)
     """
     parser = argparse.ArgumentParser(
         description="Interactive surface channel detection for Neuropixel recordings"
@@ -164,12 +148,18 @@ def get_bin_file_path_and_options():
     parser.add_argument(
         "--spike_threshold",
         type=float,
-        default=-5.0,
-        help="Spike detection threshold in multiples of MAD (default: -5.0)",
+        default=-6.0,
+        help="Spike detection threshold in multiples of MAD (default: -6.0)",
+    )
+    parser.add_argument(
+        "-t",
+        "--time_slice",
+        nargs=2,
+        type=float,
+        help="Time window to analyze. Either as proportions (0.0-1.0) or seconds (0-total). E.g. '-t 0.8 1' or '-t 4500 7000'",
     )
     args = parser.parse_args()
 
-    # Parse and validate highpass cutoff
     hf_cutoff = None
     if args.hf is not None:
         try:
@@ -189,18 +179,35 @@ def get_bin_file_path_and_options():
         bin_path = Path(args.bin_file)
         if not bin_path.exists():
             raise FileNotFoundError(f"File not found: {bin_path}")
+            
+        time_slice = None
+        if args.time_slice:
+            t1, t2 = args.time_slice
+            if t1 < 0 or t2 < 0:
+                 print("\033[91mError: Time values must be positive.\033[0m")
+                 sys.exit(1)
+            if t1 >= t2:
+                 print("\033[91mError: Start time must be less than end time.\033[0m")
+                 sys.exit(1)
+            
+            # heuristic: if both <= 1.0, treat as proportions. else seconds.
+            if t2 <= 1.0:
+                 time_slice = ("proportion", t1, t2)
+            else:
+                 time_slice = ("seconds", t1, t2)
+                 
         return bin_path, {
             "cmr": args.cmr,
             "hf_cutoff": hf_cutoff,
             "debug": args.debug,
             "n_chunks": args.n_chunks,
             "spike_threshold": args.spike_threshold,
+            "time_slice": time_slice,
         }
     else:
-        # No command-line argument provided - open file dialog
         print("No file specified, opening file dialog...")
         root = tk.Tk()
-        root.withdraw()  # Hide the main window
+        root.withdraw()
 
         file_path = filedialog.askopenfilename(
             title="Select Neuropixel recording file",
@@ -216,18 +223,18 @@ def get_bin_file_path_and_options():
             print("No file selected. Exiting.")
             sys.exit(0)
 
-        root.destroy()  # Clean up the hidden window
+        root.destroy()
 
-        # Show options dialog
         options = get_options_dialog(cmr_default=args.cmr, hf_default=hf_cutoff)
         if not options["confirmed"]:
             print("Options dialog cancelled. Exiting.")
             sys.exit(0)
 
-        # Add debug flag, n_chunks, and spike_threshold (always False/20/-4.5 when using GUI mode)
         options["debug"] = False
         options["n_chunks"] = 20
-        options["spike_threshold"] = -4.5
+        # spike_threshold will be whatever default is passed to analyze_recording or hardcoded here
+        options["spike_threshold"] = -6
+        options["time_slice"] = None 
 
         return Path(file_path), options
 
@@ -235,18 +242,11 @@ def get_bin_file_path_and_options():
 def save_surface_channel(bin_path, surface_results, is_multi_shank=False):
     """
     Save the surface channel(s) to a text file next to the .bin file.
-
-    :param bin_path: Path to the original .bin file
-    :param surface_results: For single-shank: int (surface channel)
-                           For multi-shank: list of dicts with keys 'shank_id', 'abs_channel', 'rel_channel'
-    :param is_multi_shank: Boolean indicating if this is a multi-shank probe
     """
-    # Create output filename
     output_file = bin_path.with_suffix("").with_suffix(".surface_channel.txt")
 
     with open(output_file, "w") as f:
         if is_multi_shank:
-            # Multi-shank format: shank0: 245 (on-shank: 50)
             for result in surface_results:
                 shank_id = result["shank_id"]
                 abs_ch = result["abs_channel"]
@@ -254,7 +254,6 @@ def save_surface_channel(bin_path, surface_results, is_multi_shank=False):
                 f.write(f"shank{shank_id}: {abs_ch} (on-shank: {rel_ch})\n")
             print(f"Multi-shank surface channels saved to: {output_file}")
         else:
-            # Single-shank format: just the channel number
             f.write(f"{surface_results}\n")
             print(f"Surface channel {surface_results} saved to: {output_file}")
 
@@ -262,62 +261,50 @@ def save_surface_channel(bin_path, surface_results, is_multi_shank=False):
 
 
 def main():
-    # Get the bin file path and options from command line or dialogs
     bin_path, options = get_bin_file_path_and_options()
     print(f"Processing: {bin_path}")
 
-    # Print CMR status if enabled
     if options["cmr"]:
         print("Applying Common Median Referencing (CMR)")
 
     with Reader(bin_path) as sr:
-        # Get robust channel labels by aggregating over chunks, but get the
-        # features and raw data from the LAST chunk for plotting.
-        channel_labels, xfeats, raw, fs = detect_bad_channels_cbin(
+        channel_labels, xfeats, raw, fs, firing_rates, spike_amplitudes = analyze_recording(
             sr,
             n_batches=options["n_chunks"],
+            spike_threshold=options["spike_threshold"],
             apply_cmr_flag=options["cmr"],
             debug=options["debug"],
+            time_slice=options["time_slice"],
         )
 
-        # Apply the median filter to the LF coherence feature for plotting,
-        # exactly as the IBL QC pipeline does.
-        xfeats["xcor_lf"] = scipy.signal.medfilt(xfeats["xcor_lf"], 11)
-
-        # Compute firing rates across all channels
-        print("Computing firing rates and spike amplitudes...")
-        firing_rates, spike_amplitudes = compute_firing_rates(
-            sr, n_batches=options["n_chunks"], threshold=options["spike_threshold"]
-        )
         print(
             f"Firing rate range: {np.min(firing_rates):.1f} - {np.max(firing_rates):.1f} spikes/s"
         )
 
-        # Save debug data if requested
+
+        # apply the median filter to the lf coherence feature for plotting,
+        # exactly as the ibl pipeline does.
+        xfeats["xcor_lf"] = scipy.signal.medfilt(xfeats["xcor_lf"], 11)
+
         if options["debug"] and "debug" in xfeats:
             debug_file = bin_path.with_suffix("").with_suffix(".debug.npy")
             np.save(debug_file, xfeats["debug"])
             print(f"Debug data saved to: {debug_file}")
             print(f"  Available keys: {list(xfeats['debug'].keys())}")
 
-        # Get shank information
         shank_info = get_shank_info(sr.geometry)
 
-        # Print probe information
         probe_version = sr.version if hasattr(sr, "version") else "Unknown"
         num_active_shanks = len(shank_info) if shank_info is not None else 1
         print(f"Probe version: {probe_version}, Active shanks: {num_active_shanks}")
 
         if shank_info is None or len(shank_info) == 1:
-            # Single active shank - use original workflow
-            # Find the auto-detected surface channel
             auto_surface_channel = find_surface_channel(channel_labels)
             if auto_surface_channel == -1:
                 print("No surface channel detected")
             else:
                 print(f"Auto-detected surface channel: {auto_surface_channel}")
 
-            # Show interactive plot and get user-selected surface channel (if any)
             final_surface_channel = show_channels_labels_interactive(
                 raw,
                 fs,
@@ -330,14 +317,12 @@ def main():
                 hf_cutoff=options["hf_cutoff"],
             )
 
-            # Save the final surface channel
             if final_surface_channel is not None:
                 save_surface_channel(
                     bin_path, final_surface_channel, is_multi_shank=False
                 )
 
         else:
-            # Multi-shank probe - process each shank sequentially
             num_shanks = len(shank_info)
             print(f"Multi-shank probe detected: {num_shanks} shanks")
 
@@ -348,19 +333,15 @@ def main():
                     f"\n=== Processing Shank {shank_id} ({len(shank_channels)} channels) ==="
                 )
 
-                # Filter data for this shank
                 raw_shank, labels_shank, xfeats_shank = filter_data_by_shank(
                     raw, channel_labels, xfeats, shank_channels
                 )
 
-                # Filter firing rates and spike amplitudes for this shank
                 firing_rates_shank = firing_rates[shank_channels]
                 spike_amplitudes_shank = spike_amplitudes[shank_channels]
 
-                # Find auto-detected surface for this shank
                 auto_surface_local = find_surface_channel(labels_shank)
 
-                # Convert local channel index to absolute channel index
                 if auto_surface_local == -1:
                     auto_surface_abs = -1
                 else:
@@ -371,7 +352,6 @@ def main():
                 else:
                     print(f"Auto-detected surface channel (abs): {auto_surface_abs}")
 
-                # Show interactive plot for this shank
                 final_surface_abs = show_channels_labels_interactive(
                     raw_shank,
                     fs,
@@ -387,16 +367,13 @@ def main():
                     hf_cutoff=options["hf_cutoff"],
                 )
 
-                # Calculate relative channel (position within shank)
                 if final_surface_abs == -1:
                     final_surface_rel = -1
                 else:
-                    # Find the position of this channel within the shank's channels
                     final_surface_rel = np.where(shank_channels == final_surface_abs)[
                         0
                     ][0]
 
-                # Store results
                 surface_results.append(
                     {
                         "shank_id": shank_id,
@@ -409,7 +386,6 @@ def main():
                     f"Shank {shank_id}: Surface channel = {final_surface_abs} (on-shank: {final_surface_rel})"
                 )
 
-            # Save all results
             save_surface_channel(bin_path, surface_results, is_multi_shank=True)
 
 

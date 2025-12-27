@@ -1,12 +1,17 @@
+import concurrent.futures
+import multiprocessing
+from pathlib import Path
+
 import numpy as np
+import psutil
+import scipy.fft
 import scipy.signal
 import scipy.stats
-import scipy.fft
 
 from reader import Reader
 
-LF_CUTOFF_HZ = 10       
-GAMMA_FREQ_RANGE = (60, 100) 
+LF_CUTOFF_HZ = 10
+GAMMA_FREQ_RANGE = (60, 100)
 
 
 def rms(x, axis=-1):
@@ -33,6 +38,7 @@ def channels_similarity(raw, nmed=0):
     """
     Computes the similarity based on zero-lag crosscorrelation of each channel with the median trace
     """
+
     def fxcor(x, y):
         return scipy.fft.irfft(
             scipy.fft.rfft(x) * np.conj(scipy.fft.rfft(y)), n=raw.shape[-1]
@@ -52,6 +58,168 @@ def channels_similarity(raw, nmed=0):
     return xcor
 
 
+def process_chunk(
+    bin_file_path,
+    t0,
+    batch_duration,
+    spike_threshold,
+    apply_cmr_flag,
+    debug,
+):
+    """
+    Worker function to process a single chunk of data.
+    """
+    # Re-open reader in worker process
+    with Reader(bin_file_path) as sr:
+        nc = sr.nc - sr.nsync
+        fs = sr.fs
+
+        # Pre-calculate filter coefficients (same as before)
+        sos_hp = scipy.signal.butter(
+            N=3, Wn=300 / fs * 2, btype="highpass", output="sos"
+        )
+        sos_lp = scipy.signal.butter(
+            N=3, Wn=LF_CUTOFF_HZ / fs * 2, btype="lowpass", output="sos"
+        )
+
+        sl = slice(int(t0 * fs), int((t0 + batch_duration) * fs))
+        raw = sr[sl, :nc].T
+
+        raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
+
+        # --- data streams ---
+        # 1. activity stream (strictly cmr + hp)
+        raw_cmr = apply_cmr(raw)
+        hf_activity = scipy.signal.sosfiltfilt(sos_hp, raw_cmr, axis=1)
+
+        # 3. noise stream (strictly raw)
+        hf_noise = scipy.signal.sosfiltfilt(sos_hp, raw, axis=1)
+
+        # 4. feature/plot stream (configurable)
+        if apply_cmr_flag:
+            raw_features = raw_cmr
+            hf_features = hf_activity
+        else:
+            raw_features = raw
+            hf_features = hf_noise
+
+        lf_features = scipy.signal.sosfiltfilt(sos_lp, raw_features, axis=1)
+
+        # --- calculation ---
+
+        # spikes / activity
+        mad = np.median(np.abs(hf_activity), axis=1)
+        thresholds = spike_threshold * mad
+
+        chunk_spikes = np.zeros(nc)
+        chunk_amplitudes = [[] for _ in range(nc)]
+
+        for ch in range(nc):
+            # find negative threshold crossings
+            crossings = np.where(hf_activity[ch, :] < thresholds[ch])[0]
+            if len(crossings) > 0:
+                refractory_samples = int(fs / 1000)
+                diff = np.diff(crossings)
+                valid = np.r_[True, diff > refractory_samples]
+
+                num_valid = np.sum(valid)
+                chunk_spikes[ch] = num_valid
+
+                # collect amplitudes
+                for idx in crossings[valid]:
+                    end_search = min(idx + int(fs / 1000), hf_activity.shape[1])
+                    if end_search > idx:
+                        amp = np.min(hf_activity[ch, idx:end_search])
+                        chunk_amplitudes[ch].append(amp)
+                    else:
+                        chunk_amplitudes[ch].append(hf_activity[ch, idx])
+
+        current_chunk_median_fr = np.median(chunk_spikes / batch_duration)
+
+        # features
+        n_samples = raw.shape[-1]
+        fscale, psd_cmr = scipy.signal.welch(raw_cmr * 1e6, fs=fs, nperseg=n_samples)
+
+        mask_gamma = (fscale >= GAMMA_FREQ_RANGE[0]) & (fscale <= GAMMA_FREQ_RANGE[1])
+        if np.sum(mask_gamma) > 0:
+            power_gamma = np.mean(psd_cmr[:, mask_gamma], axis=-1)
+        else:
+            power_gamma = np.zeros(nc)
+
+        # noisy/dead detection (using raw / hf_noise)
+        xcor_raw = channels_similarity(raw)
+        xcor_hf_val = detrend(xcor_raw, 11)
+
+        fscale_raw, psd_raw = scipy.signal.welch(raw * 1e6, fs=fs, nperseg=n_samples)
+        psd_hf_threshold = 0.02
+        psd_hf_val = np.mean(psd_raw[:, fscale_raw > (fs / 2 * 0.8)], axis=-1)
+
+        # surface detection (using configurable streams)
+        xcorf_features = channels_similarity(hf_features)
+        xcor_lf_val = xcorf_features - detrend(xcorf_features, 11) - 1
+
+        # mav (activity - strictly preprocessed)
+        mean_abs_volt = np.mean(np.abs(hf_activity), axis=-1)
+
+        chunk_xfeats = {
+            "ind": np.arange(nc),
+            "rms_raw": rms(raw_features),
+            "rms_lf": rms(lf_features),
+            "power_gamma": power_gamma,
+            "xcor_hf": xcor_hf_val,
+            "xcor_lf": xcor_lf_val,
+            "psd_hf": psd_hf_val,
+            "mean_abs_volt": mean_abs_volt,
+        }
+
+        # detect bad channels (per chunk)
+        similarity_threshold = (-0.5, 1)
+
+        idead = np.where(similarity_threshold[0] > chunk_xfeats["xcor_hf"])[0]
+        inoisy = np.where(
+            np.logical_or(
+                chunk_xfeats["psd_hf"] > psd_hf_threshold,
+                chunk_xfeats["xcor_hf"] > similarity_threshold[1],
+            )
+        )[0]
+
+        # outside brain detection (gradient of lf coherence)
+        signal_noisy = chunk_xfeats["xcor_lf"]
+        window_size = 25
+        kernel = np.ones(window_size) / window_size
+        signal_filtered = np.convolve(signal_noisy, kernel, mode="same")
+        diff_x = np.diff(signal_filtered)
+        indx = np.where(diff_x < -0.02)[0]
+
+        ichannels = np.zeros(nc)
+        if indx.size > 0:
+            indx_threshold = np.floor(np.median(indx)).astype(int)
+            threshold_val = signal_noisy[indx_threshold]
+            ioutside = np.where(signal_noisy < threshold_val)[0]
+            # check contiguity at top
+            if ioutside.size > 0 and ioutside[-1] == (nc - 1):
+                a = np.cumsum(np.r_[0, np.diff(ioutside) - 1])
+                ioutside = ioutside[a == np.max(a)]
+                ichannels[ioutside] = 3
+
+        ichannels[idead] = 1
+        ichannels[inoisy] = 2
+
+        debug_info = None
+        if debug:
+            debug_info = {"gradient_drops": len(indx) if indx.size > 0 else 0}
+
+        return {
+            "chunk_spikes": chunk_spikes,
+            "amplitudes": chunk_amplitudes,
+            "median_fr": current_chunk_median_fr,
+            "xfeats": chunk_xfeats,
+            "channel_labels": ichannels,
+            "debug_info": debug_info,
+            "t0": t0,  # return t0 to identify best chunk later
+        }
+
+
 def analyze_recording(
     bin_file,
     n_batches=20,
@@ -63,214 +231,139 @@ def analyze_recording(
 ):
     """
     Unified analysis function.
-    
-    :param time_slice: Optional tuple ("seconds"|"proportion", start, end). 
+
+    :param time_slice: Optional tuple ("seconds"|"proportion", start, end).
                        Restricts analysis to this time window.
     :return: channel_flags, xfeats_median, raw_best_chunk, fs, firing_rates, spike_amplitudes
     """
-    sr = bin_file if isinstance(bin_file, Reader) else Reader(bin_file)
+    # handle bin_file object or path
+    if isinstance(bin_file, Reader):
+        # if it's already a reader, we need the path to reopen in workers
+        bin_file_path = bin_file.file_bin
+        sr = bin_file
+        # if we are passed a Reader, we assume it's open, but let's check
+        if not sr.is_open:
+            sr.open()
+    else:
+        bin_file_path = Path(bin_file)
+        sr = Reader(bin_file_path)
+
     nc = sr.nc - sr.nsync
     fs = sr.fs
-    
-    # pre-calculate filter coefficients
-    sos_hp = scipy.signal.butter(N=3, Wn=300 / fs * 2, btype="highpass", output="sos")
-    sos_lp = scipy.signal.butter(N=3, Wn=LF_CUTOFF_HZ / fs * 2, btype="lowpass", output="sos")
-    
+
+    # Calculate n_jobs
+    # Estimate memory: ~111MB per job for 0.4s chunk. Scale linearly.
+    # Base: 385 ch * 30000 Hz * 0.4s * 4 bytes * 6 copies approx 111MB
+    estimated_mem_per_job = nc * fs * batch_duration * 4 * 6
+    available_mem = psutil.virtual_memory().available
+    max_jobs_mem = int(available_mem / estimated_mem_per_job)
+    max_jobs_cpu = multiprocessing.cpu_count() - 1
+
+    n_jobs = max(1, min(max_jobs_cpu, max_jobs_mem))
+    print(
+        f"Parallel processing with {n_jobs} jobs (Mem limit: {max_jobs_mem}, CPU limit: {max_jobs_cpu})"
+    )
+
     xfeats_accumulator = {}
-    chunk_median_frs = [] 
-    
+
     total_spikes = np.zeros(nc)
     total_duration = 0
     all_amplitudes = [[] for _ in range(nc)]
-    
+
     channel_labels_all = np.zeros((nc, n_batches))
-    
-    best_chunk_raw = None
+
     max_chunk_median_fr = -1.0
-    
+    best_chunk_t0 = -1
+
     # determine time range
     t_start_abs = 0
     t_end_abs = sr.rl
-    
+
     if time_slice:
         mode, t1, t2 = time_slice
         if mode == "proportion":
             t_start_abs = t1 * sr.rl
             t_end_abs = t2 * sr.rl
-        else: # seconds
+        else:  # seconds
             t_start_abs = t1
             t_end_abs = t2
-            
+
     t_start_abs = max(0, min(t_start_abs, sr.rl))
     t_end_abs = max(0, min(t_end_abs, sr.rl))
-    
+
     if t_end_abs <= t_start_abs:
-         print(f"Warning: Invalid time slice {t_start_abs}-{t_end_abs}. Using full duration.")
-         t_start_abs = 0
-         t_end_abs = sr.rl
+        print(
+            f"Warning: Invalid time slice {t_start_abs}-{t_end_abs}. Using full duration."
+        )
+        t_start_abs = 0
+        t_end_abs = sr.rl
 
     scan_end = max(t_start_abs, t_end_abs - batch_duration)
-    
-    print(f"Analyzing {n_batches} chunks of {batch_duration}s in range {t_start_abs:.1f}-{t_end_abs:.1f}s...")
-    
+
+    print(
+        f"Analyzing {n_batches} chunks of {batch_duration}s in range {t_start_abs:.1f}-{t_end_abs:.1f}s..."
+    )
+
     chunk_starts = np.linspace(t_start_abs, scan_end, n_batches)
-    
-    for i, t0 in enumerate(chunk_starts):
-        sl = slice(int(t0 * fs), int((t0 + batch_duration) * fs))
-        raw = sr[sl, :nc].T 
-        
-        raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
-        
-        # --- data streams ---
-        # 1. activity stream (strictly cmr + hp)
-        raw_cmr = apply_cmr(raw)
-        hf_activity = scipy.signal.sosfiltfilt(sos_hp, raw_cmr, axis=1) 
-        
-        # 2. gamma stream (strictly cmr, broadband)
-        
-        # 3. noise stream (strictly raw)
-        hf_noise = scipy.signal.sosfiltfilt(sos_hp, raw, axis=1) 
-        
-        # 4. feature/plot stream (configurable)
-        if apply_cmr_flag:
-            raw_features = raw_cmr
-            hf_features = hf_activity 
-        else:
-            raw_features = raw
-            hf_features = hf_noise 
-            
-        lf_features = scipy.signal.sosfiltfilt(sos_lp, raw_features, axis=1)
-        
-        
-        # --- calculation ---
-        
-        # spikes / activity
-        mad = np.median(np.abs(hf_activity), axis=1)
-        thresholds = spike_threshold * mad
-        
-        chunk_spikes = np.zeros(nc)
-        
-        for ch in range(nc):
-            # find negative threshold crossings
-            crossings = np.where(hf_activity[ch, :] < thresholds[ch])[0]
-            if len(crossings) > 0:
-                refractory_samples = int(fs / 1000)
-                diff = np.diff(crossings)
-                valid = np.r_[True, diff > refractory_samples]
-                
-                num_valid = np.sum(valid)
-                total_spikes[ch] += num_valid
-                chunk_spikes[ch] = num_valid
-                
-                # collect amplitudes
-                for idx in crossings[valid]:
-                     end_search = min(idx + int(fs/1000), hf_activity.shape[1])
-                     if end_search > idx:
-                         amp = np.min(hf_activity[ch, idx:end_search])
-                         all_amplitudes[ch].append(amp)
-                     else:
-                         all_amplitudes[ch].append(hf_activity[ch, idx])
 
-        total_duration += batch_duration
-        current_chunk_median_fr = np.median(chunk_spikes / batch_duration)
-        chunk_median_frs.append(current_chunk_median_fr)
-        
-        # choose best chunk (based on activity)
-        if current_chunk_median_fr > max_chunk_median_fr:
-            max_chunk_median_fr = current_chunk_median_fr
-            best_chunk_raw = raw_features.copy() 
-        
-        
-        # features
-        n_samples = raw.shape[-1]
-        fscale, psd_cmr = scipy.signal.welch(raw_cmr * 1e6, fs=fs, nperseg=n_samples)
-        
-        mask_gamma = (fscale >= GAMMA_FREQ_RANGE[0]) & (fscale <= GAMMA_FREQ_RANGE[1])
-        if np.sum(mask_gamma) > 0:
-            power_gamma = np.mean(psd_cmr[:, mask_gamma], axis=-1)
-        else:
-            power_gamma = np.zeros(nc)
-            
-        # noisy/dead detection (using raw / hf_noise)
-        xcor_raw = channels_similarity(raw)
-        xcor_hf_val = detrend(xcor_raw, 11)
-        
-        fscale_raw, psd_raw = scipy.signal.welch(raw * 1e6, fs=fs, nperseg=n_samples)
-        psd_hf_threshold = 0.02 
-        psd_hf_val = np.mean(psd_raw[:, fscale_raw > (fs / 2 * 0.8)], axis=-1)
-        
-        # surface detection (using configurable streams)
-        xcorf_features = channels_similarity(hf_features)
-        xcor_lf_val = xcorf_features - detrend(xcorf_features, 11) - 1
-        
-        # mav (activity - strictly preprocessed)
-        mean_abs_volt = np.mean(np.abs(hf_activity), axis=-1)
-        
-        chunk_xfeats = {
-            "ind": np.arange(nc),
-            "rms_raw": rms(raw_features),
-            "rms_lf": rms(lf_features),
-            "power_gamma": power_gamma,     
-            "xcor_hf": xcor_hf_val,         
-            "xcor_lf": xcor_lf_val,         
-            "psd_hf": psd_hf_val,           
-            "mean_abs_volt": mean_abs_volt, 
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_jobs) as executor:
+        futures = {
+            executor.submit(
+                process_chunk,
+                bin_file_path,
+                t0,
+                batch_duration,
+                spike_threshold,
+                apply_cmr_flag,
+                debug,
+            ): i
+            for i, t0 in enumerate(chunk_starts)
         }
-        
-        if not xfeats_accumulator:
-            for k in chunk_xfeats.keys():
-                 xfeats_accumulator[k] = []
-        for k, v in chunk_xfeats.items():
-            xfeats_accumulator[k].append(v)
-            
-        # detect bad channels (per chunk)
-        similarity_threshold=(-0.5, 1) 
-        
-        idead = np.where(similarity_threshold[0] > chunk_xfeats["xcor_hf"])[0]
-        inoisy = np.where(
-            np.logical_or(
-                chunk_xfeats["psd_hf"] > psd_hf_threshold,
-                chunk_xfeats["xcor_hf"] > similarity_threshold[1],
-            )
-        )[0]
-        
-        # outside brain detection (gradient of lf coherence)
-        signal_noisy = chunk_xfeats["xcor_lf"]
-        window_size = 25
-        kernel = np.ones(window_size) / window_size
-        signal_filtered = np.convolve(signal_noisy, kernel, mode="same")
-        diff_x = np.diff(signal_filtered)
-        indx = np.where(diff_x < -0.02)[0]
-        
-        ichannels = np.zeros(nc)
-        if indx.size > 0:
-            indx_threshold = np.floor(np.median(indx)).astype(int)
-            threshold_val = signal_noisy[indx_threshold]
-            ioutside = np.where(signal_noisy < threshold_val)[0]
-             # check contiguity at top
-            if ioutside.size > 0 and ioutside[-1] == (nc - 1):
-                a = np.cumsum(np.r_[0, np.diff(ioutside) - 1])
-                ioutside = ioutside[a == np.max(a)]
-                ichannels[ioutside] = 3
-        
-        ichannels[idead] = 1
-        ichannels[inoisy] = 2
-        
-        channel_labels_all[:, i] = ichannels
-        
-        if debug and i == n_batches - 1:
-            print(f"Debug (Chunk {i}):")
-            if indx.size > 0:
-                print(f"  Gradient drops: {len(indx)}")
-            else:
-                 print("  No gradient drops.")
 
+        for future in concurrent.futures.as_completed(futures):
+            i = futures[future]
+            try:
+                res = future.result()
 
-    
-    # aggregation
-    
+                # Aggregate spikes
+                total_spikes += res["chunk_spikes"]
+                total_duration += batch_duration  # this assumes all chunks succeed
+
+                # Aggregate amplitudes
+                for ch in range(nc):
+                    all_amplitudes[ch].extend(res["amplitudes"][ch])
+
+                # Collect features
+                chunk_xfeats = res["xfeats"]
+                if not xfeats_accumulator:
+                    for k in chunk_xfeats.keys():
+                        xfeats_accumulator[k] = []
+                for k, v in chunk_xfeats.items():
+                    xfeats_accumulator[k].append(v)
+
+                # Collect labels
+                channel_labels_all[:, i] = res["channel_labels"]
+
+                # Check for best chunk
+                if res["median_fr"] > max_chunk_median_fr:
+                    max_chunk_median_fr = res["median_fr"]
+                    best_chunk_t0 = res["t0"]
+
+                if debug:
+                    dinfo = res.get("debug_info")
+                    if dinfo:
+                        drops = dinfo.get("gradient_drops", 0)
+                        if drops > 0:
+                            print(f"Debug (Chunk {i}):  Gradient drops: {drops}")
+                        else:
+                            print(f"Debug (Chunk {i}):  No gradient drops.")
+
+            except Exception as e:
+                print(f"Chunk {i} processing failed: {e}")
+
+    # Final aggregation
     firing_rates = total_spikes / total_duration
-    
+
     spike_amplitudes = np.zeros(nc)
     for ch in range(nc):
         if len(all_amplitudes[ch]) > 0:
@@ -281,15 +374,46 @@ def analyze_recording(
     xfeats_median = {"ind": np.arange(nc)}
     for k, v_list in xfeats_accumulator.items():
         xfeats_median[k] = np.median(np.stack(v_list, axis=1), axis=1)
-        
+
     channel_flags, _ = scipy.stats.mode(channel_labels_all, axis=1)
     channel_flags = channel_flags.flatten()
-    
+
     num_outside = np.sum(channel_flags == 3)
     if num_outside > 0:
-        print(f"Final aggregated detection: {num_outside} channels marked as outside brain")
-        
-    return channel_flags, xfeats_median, best_chunk_raw, fs, firing_rates, spike_amplitudes
+        print(
+            f"Final aggregated detection: {num_outside} channels marked as outside brain"
+        )
+
+    # Read best chunk raw data for plotting
+    best_chunk_raw = None
+    if best_chunk_t0 != -1:
+        # Re-use sr if it's available, or open new one
+        # If bin_file was a path, sr is a local Reader we made. If it was passed in, it's that one.
+        # But caution: if passed in, we should check if it's still good.
+        # Reader is context manager but we handled it.
+
+        sl = slice(int(best_chunk_t0 * fs), int((best_chunk_t0 + batch_duration) * fs))
+        raw = sr[sl, :nc].T
+        raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
+
+        if apply_cmr_flag:
+            best_chunk_raw = apply_cmr(raw)
+        else:
+            best_chunk_raw = raw
+
+    # If we created the reader locally, close it.
+    # If it was passed in, leave it open (responsibility of caller).
+    if not isinstance(bin_file, Reader):
+        sr.close()
+
+    return (
+        channel_flags,
+        xfeats_median,
+        best_chunk_raw,
+        fs,
+        firing_rates,
+        spike_amplitudes,
+    )
 
 
 def find_surface_channel(channel_labels):

@@ -26,10 +26,10 @@ def get_options_dialog(cmr_default=False, hf_default=None):
     options_window = tk.Tk()
     options_window.title("Options")
     options_window.geometry("350x180")
-    
+
     bg_color = "#323232"
     fg_color = "white"
-    
+
     options_window.configure(bg=bg_color)
     options_window.eval("tk::PlaceWindow . center")
 
@@ -45,7 +45,7 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         fg=fg_color,
         selectcolor="black",
         activebackground=bg_color,
-        activeforeground=fg_color
+        activeforeground=fg_color,
     )
     cmr_checkbox.pack(pady=(20, 10))
 
@@ -58,11 +58,18 @@ def get_options_dialog(cmr_default=False, hf_default=None):
         font=("Arial", 10),
         justify=tk.LEFT,
         bg=bg_color,
-        fg=fg_color
+        fg=fg_color,
     )
     hf_label.pack(side=tk.LEFT, padx=(0, 10))
 
-    hf_entry = tk.Entry(hf_frame, width=10, font=("Arial", 10), bg="#505050", fg="white", insertbackground="white")
+    hf_entry = tk.Entry(
+        hf_frame,
+        width=10,
+        font=("Arial", 10),
+        bg="#505050",
+        fg="white",
+        insertbackground="white",
+    )
     hf_entry.pack(side=tk.LEFT)
     if hf_default is not None:
         hf_entry.insert(0, str(hf_default))
@@ -99,10 +106,18 @@ def get_options_dialog(cmr_default=False, hf_default=None):
     button_frame = tk.Frame(options_window, bg=bg_color)
     button_frame.pack(pady=10)
 
-    ok_button = tk.Button(button_frame, text="OK", command=on_ok, width=10, highlightbackground=bg_color)
+    ok_button = tk.Button(
+        button_frame, text="OK", command=on_ok, width=10, highlightbackground=bg_color
+    )
     ok_button.pack(side=tk.LEFT, padx=5)
 
-    cancel_button = tk.Button(button_frame, text="Cancel", command=on_cancel, width=10, highlightbackground=bg_color)
+    cancel_button = tk.Button(
+        button_frame,
+        text="Cancel",
+        command=on_cancel,
+        width=10,
+        highlightbackground=bg_color,
+    )
     cancel_button.pack(side=tk.LEFT, padx=5)
 
     options_window.mainloop()
@@ -142,8 +157,8 @@ def get_bin_file_path_and_options():
     parser.add_argument(
         "--n_chunks",
         type=int,
-        default=20,
-        help="Number of time chunks to analyze for detection (default: 20)",
+        default=40,
+        help="Number of time chunks to analyze for detection (default: 40)",
     )
     parser.add_argument(
         "--spike_threshold",
@@ -179,23 +194,23 @@ def get_bin_file_path_and_options():
         bin_path = Path(args.bin_file)
         if not bin_path.exists():
             raise FileNotFoundError(f"File not found: {bin_path}")
-            
+
         time_slice = None
         if args.time_slice:
             t1, t2 = args.time_slice
             if t1 < 0 or t2 < 0:
-                 print("\033[91mError: Time values must be positive.\033[0m")
-                 sys.exit(1)
+                print("\033[91mError: Time values must be positive.\033[0m")
+                sys.exit(1)
             if t1 >= t2:
-                 print("\033[91mError: Start time must be less than end time.\033[0m")
-                 sys.exit(1)
-            
+                print("\033[91mError: Start time must be less than end time.\033[0m")
+                sys.exit(1)
+
             # heuristic: if both <= 1.0, treat as proportions. else seconds.
             if t2 <= 1.0:
-                 time_slice = ("proportion", t1, t2)
+                time_slice = ("proportion", t1, t2)
             else:
-                 time_slice = ("seconds", t1, t2)
-                 
+                time_slice = ("seconds", t1, t2)
+
         return bin_path, {
             "cmr": args.cmr,
             "hf_cutoff": hf_cutoff,
@@ -234,7 +249,7 @@ def get_bin_file_path_and_options():
         options["n_chunks"] = 20
         # spike_threshold will be whatever default is passed to analyze_recording or hardcoded here
         options["spike_threshold"] = -6
-        options["time_slice"] = None 
+        options["time_slice"] = None
 
         return Path(file_path), options
 
@@ -268,19 +283,20 @@ def main():
         print("Applying Common Median Referencing (CMR)")
 
     with Reader(bin_path) as sr:
-        channel_labels, xfeats, raw, fs, firing_rates, spike_amplitudes = analyze_recording(
-            sr,
-            n_batches=options["n_chunks"],
-            spike_threshold=options["spike_threshold"],
-            apply_cmr_flag=options["cmr"],
-            debug=options["debug"],
-            time_slice=options["time_slice"],
+        channel_labels, xfeats, raw, fs, firing_rates, spike_amplitudes = (
+            analyze_recording(
+                sr,
+                n_batches=options["n_chunks"],
+                spike_threshold=options["spike_threshold"],
+                apply_cmr_flag=options["cmr"],
+                debug=options["debug"],
+                time_slice=options["time_slice"],
+            )
         )
 
         print(
             f"Firing rate range: {np.min(firing_rates):.1f} - {np.max(firing_rates):.1f} spikes/s"
         )
-
 
         # apply the median filter to the lf coherence feature for plotting,
         # exactly as the ibl pipeline does.

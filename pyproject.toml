@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surface-detection"
+version = "0.1.0"
+description = "Interactive surface channel detection for Neuropixel recordings"
+readme = "README.md"
+authors = [
+    { name = "User", email = "user@example.com" }
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "mtscomp",
+    "tqdm",
+    "psutil",
+    "ONE-api"
+]
+
+[project.scripts]
+surface-detection = "surface_detection.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]

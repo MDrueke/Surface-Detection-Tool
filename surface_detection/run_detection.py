@@ -8,7 +8,7 @@ import scipy.fft
 import scipy.signal
 import scipy.stats
 
-from reader import Reader
+from .reader import Reader
 
 LF_CUTOFF_HZ = 10
 GAMMA_FREQ_RANGE = (60, 100)

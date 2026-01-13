@@ -7,11 +7,9 @@ from tkinter import filedialog
 import numpy as np
 import scipy.signal
 
-sys.path.append(str(Path(__file__).parent))
-
-from plotting import show_channels_labels_interactive
-from reader import Reader
-from run_detection import (
+from .plotting import show_channels_labels_interactive
+from .reader import Reader
+from .run_detection import (
     analyze_recording,
     filter_data_by_shank,
     find_surface_channel,

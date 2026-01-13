@@ -8,9 +8,9 @@ from pathlib import Path
 import mtscomp
 import numpy as np
 import one.alf.path
-import utils as neuropixel
-from utils import Bunch
-from utils import sha1
+
+from . import utils as neuropixel
+from .utils import Bunch, sha1
 
 SAMPLE_SIZE = 2  # int16
 DEFAULT_BATCH_SIZE = 1e6

@@ -4,18 +4,16 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.signal
-from scipy.ndimage import gaussian_filter1d
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import Button
+from scipy.ndimage import gaussian_filter1d
 
-import sys
-sys.path.append(str(Path(__file__).parent))
-from run_detection import apply_cmr
+from .run_detection import apply_cmr
 
 AP_RANGE_UV = 40
 LF_RANGE_UV = 250
-SURFACE_COLOR = "#b6d56b"  
-SMOOTHING_SIGMA = 2.0 
+SURFACE_COLOR = "#b6d56b"
+SMOOTHING_SIGMA = 2.0
 
 
 def apply_highpass_filter(raw, fs, cutoff_hz):
@@ -47,33 +45,33 @@ def apply_highpass_filter(raw, fs, cutoff_hz):
 nature_style = {
     "axes.axisbelow": True,
     "axes.edgecolor": "black",
-    "axes.facecolor": "#545454",  
+    "axes.facecolor": "#545454",
     "axes.grid": False,
-    "axes.labelcolor": "white",  
+    "axes.labelcolor": "white",
     "axes.labelsize": 12,
     "axes.linewidth": 1,
-    "axes.titlecolor": "white",  
+    "axes.titlecolor": "white",
     "axes.titlesize": 13,
-    "legend.labelcolor": "white",  
-    "figure.facecolor": "#323232",  
+    "legend.labelcolor": "white",
+    "figure.facecolor": "#323232",
     "figure.figsize": (10, 6),
     "font.family": "sans-serif",
     "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
     "font.size": 12,
-    "grid.color": "#505050",  
+    "grid.color": "#505050",
     "grid.linestyle": "--",
     "grid.linewidth": 0.5,
     "legend.fontsize": 12,
     "lines.linewidth": 2,
     "lines.markersize": 6,
-    "xtick.color": "white",  
+    "xtick.color": "white",
     "xtick.direction": "in",
     "xtick.labelsize": 12,
     "xtick.major.size": 5,
     "xtick.major.width": 1,
     "xtick.minor.size": 3,
     "xtick.minor.width": 0.5,
-    "ytick.color": "white", 
+    "ytick.color": "white",
     "ytick.direction": "in",
     "ytick.labelsize": 12,
     "ytick.major.size": 5,
@@ -103,10 +101,10 @@ def show_channels_labels(
         1, 5, figsize=(18, 6), gridspec_kw={"width_ratios": [1, 1, 1, 8, 0.2]}
     )
     ax[0].plot(xfeats["xcor_hf"], np.arange(nc))
-    ax[0].plot(  
+    ax[0].plot(
         xfeats["xcor_hf"][(iko := channel_labels == 1)], np.arange(nc)[iko], "k*"
     )
-    ax[0].plot(  
+    ax[0].plot(
         xfeats["xcor_hf"][
             (iko := np.where(xfeats["xcor_hf"] > similarity_threshold[1]))
         ],
@@ -121,7 +119,7 @@ def show_channels_labels(
         ylim=[0, nc],
         title="dead\nchannels",
     )
-    ax[1].plot(xfeats["psd_hf"], np.arange(nc), "w-")  
+    ax[1].plot(xfeats["psd_hf"], np.arange(nc), "w-")
     ax[1].plot(
         xfeats["psd_hf"][(iko := xfeats["psd_hf"] > psd_hf_threshold)],
         np.arange(nc)[iko],
@@ -131,9 +129,9 @@ def show_channels_labels(
     )
     ax[1].plot(psd_hf_threshold * np.array([1, 1]), [0, nc], "--", color="gray")
     ax[1].set(ylabel="", xlabel="HF\npower", ylim=[0, nc], title="noisy\nchannels")
-    ax[1].tick_params(labelleft=False)  
+    ax[1].tick_params(labelleft=False)
     ax[1].sharey(ax[0])
-    ax[2].plot(xfeats["xcor_lf"], np.arange(nc), "w-")  
+    ax[2].plot(xfeats["xcor_lf"], np.arange(nc), "w-")
     ax[2].plot(
         xfeats["xcor_lf"][(iko := channel_labels == 3)],
         np.arange(nc)[iko],
@@ -142,7 +140,7 @@ def show_channels_labels(
         markersize=8,
     )
     ax[2].set(ylabel="", xlabel="LF\ncoherence", ylim=[0, nc], title="outside")
-    ax[2].tick_params(labelleft=False)  
+    ax[2].tick_params(labelleft=False)
     ax[2].sharey(ax[0])
     voltageshow(raw[:, :ns_plot], fs, ax=ax[3], cax=ax[4])
     ax[3].sharey(ax[0])
@@ -271,13 +269,13 @@ def show_channels_labels_interactive(
         auto_surface_rel = auto_surface_channel
 
     fig = plt.figure(figsize=(13, 9))
-    
+
     # layout strategy using nested gridspec
     # outer grid: 2 rows (checkboxes, main content)
-    gs_outer = fig.add_gridspec(2, 1, height_ratios=[0.05, 1.9], hspace=0.05) 
+    gs_outer = fig.add_gridspec(2, 1, height_ratios=[0.05, 1.9], hspace=0.05)
 
     fig.subplots_adjust(left=0.05, right=0.95, top=0.92, bottom=0.02)
-    
+
     # inner grid: 3 rows (heatmap, features, buttons)
     gs_inner = gs_outer[1].subgridspec(3, 1, height_ratios=[0.8, 1.0, 0.08], hspace=0.5)
 
@@ -287,14 +285,14 @@ def show_channels_labels_interactive(
     ax_cbar = fig.add_subplot(gs_heatmap[0, 1])
 
     # --- row 2: features ---
-    gs_features = gs_inner[1].subgridspec(1, 7, wspace=0.1) 
-    
+    gs_features = gs_inner[1].subgridspec(1, 7, wspace=0.1)
+
     ax_feats = [fig.add_subplot(gs_features[0, i]) for i in range(7)]
-    
+
     ax_hf_coh = ax_feats[0]
     ax_psd_hf = ax_feats[1]
     ax_lf_coh = ax_feats[2]
-    ax_fr     = ax_feats[3] 
+    ax_fr = ax_feats[3]
     ax_lf_pow = ax_feats[4]
     ax_gamma_pow = ax_feats[5]
     ax_sp_amp = ax_feats[6]
@@ -303,16 +301,16 @@ def show_channels_labels_interactive(
     all_feature_axes = ax_feats
 
     # --- row 0: checkboxes ---
-    gs_checkbox = gs_outer[0].subgridspec(1, 4, width_ratios=[1, 0.1, 2, 1]) 
+    gs_checkbox = gs_outer[0].subgridspec(1, 4, width_ratios=[1, 0.1, 2, 1])
     gs_check_inner = gs_outer[0].subgridspec(1, 2, wspace=0.1)
-    
+
     checkbox_ax1 = fig.add_subplot(gs_check_inner[0, 0])
     checkbox_ax2 = fig.add_subplot(gs_check_inner[0, 1])
     checkbox_ax1.axis("off")
     checkbox_ax2.axis("off")
 
     checkbox_labels = ["  Common Median Reference", "  Highpass (300 Hz)"]
-    checkbox_states = [True, True]  
+    checkbox_states = [True, True]
     checkbox_axes = [checkbox_ax1, checkbox_ax2]
 
     checkbox_rects = []
@@ -321,95 +319,124 @@ def show_channels_labels_interactive(
 
     for i, (label, ax_check) in enumerate(zip(checkbox_labels, checkbox_axes)):
         # align checkboxes
-        if i == 0: x_pos = 0.5 
-        else: x_pos = 0.1 
+        if i == 0:
+            x_pos = 0.5
+        else:
+            x_pos = 0.1
 
         y_pos = 0.5
         box_size = 0.8
-        
+
         x_pos = 0.1
         y_pos = 0.15
-        
+
         rect = Rectangle(
-            (x_pos, y_pos), box_size, box_size,
-            fill=False, edgecolor="white", linewidth=1.5
+            (x_pos, y_pos),
+            box_size,
+            box_size,
+            fill=False,
+            edgecolor="white",
+            linewidth=1.5,
         )
         ax_check.add_patch(rect)
         checkbox_rects.append(rect)
 
         text = ax_check.text(
-            x_pos + box_size + 0.05, y_pos + box_size / 2, label,
-            verticalalignment="center", fontsize=12, color="white"
+            x_pos + box_size + 0.05,
+            y_pos + box_size / 2,
+            label,
+            verticalalignment="center",
+            fontsize=12,
+            color="white",
         )
         checkbox_texts.append(text)
 
         # visible by default
-        x_mark_1 = ax_check.plot([x_pos, x_pos + box_size], [y_pos, y_pos + box_size], "w-", linewidth=2, visible=True)[0]
-        x_mark_2 = ax_check.plot([x_pos + box_size, x_pos], [y_pos, y_pos + box_size], "w-", linewidth=2, visible=True)[0]
+        x_mark_1 = ax_check.plot(
+            [x_pos, x_pos + box_size],
+            [y_pos, y_pos + box_size],
+            "w-",
+            linewidth=2,
+            visible=True,
+        )[0]
+        x_mark_2 = ax_check.plot(
+            [x_pos + box_size, x_pos],
+            [y_pos, y_pos + box_size],
+            "w-",
+            linewidth=2,
+            visible=True,
+        )[0]
         checkbox_x_marks.append((x_mark_1, x_mark_2))
 
-        ax_check.set_xlim(0, 4) 
+        ax_check.set_xlim(0, 4)
         ax_check.set_ylim(0, 1)
         ax_check.set_aspect("equal")
 
     # set window title
     if shank_id is not None and total_shanks is not None:
-        window_title = f"Surface Channel Detection - Shank {shank_id + 1}/{total_shanks}"
+        window_title = (
+            f"Surface Channel Detection - Shank {shank_id + 1}/{total_shanks}"
+        )
     else:
         window_title = "Surface Channel Detection"
     fig.canvas.manager.set_window_title(window_title)
 
-
     # --- plot features ---
-    
+
     # hf coherence (dead)
     ax_hf_coh.plot(xfeats["xcor_hf"], np.arange(nc), "w-")
     ax_hf_coh.plot(
         xfeats["xcor_hf"][(iko := channel_labels == 1)],
         np.arange(nc)[iko],
-        "*", color="#75a1d2", markersize=8
+        "*",
+        color="#75a1d2",
+        markersize=8,
     )
     ax_hf_coh.plot(similarity_threshold[0] * np.ones(2), [0, nc], "--", color="gray")
     ax_hf_coh.plot(similarity_threshold[1] * np.ones(2), [0, nc], "--", color="gray")
-    
+
     ax_hf_coh.set(xlabel="HF\ncoherence", ylim=[0, nc], title="Dead Channels")
     theme_color = "#75a1d2"
     ax_hf_coh.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_hf_coh.xaxis.label.set_color(theme_color)
     ax_hf_coh.title.set_color(theme_color)
-    
+
     # psd hf (noisy)
     ax_psd_hf.plot(xfeats["psd_hf"], np.arange(nc), "w-")
     ax_psd_hf.plot(
         xfeats["psd_hf"][(iko := xfeats["psd_hf"] > psd_hf_threshold)],
         np.arange(nc)[iko],
-        "*", color="#d5806b", markersize=8
+        "*",
+        color="#d5806b",
+        markersize=8,
     )
     ax_psd_hf.plot(psd_hf_threshold * np.array([1, 1]), [0, nc], "--", color="gray")
-    
+
     ax_psd_hf.set(xlabel="HF\npower", ylim=[0, nc], title="Noisy Channels")
     theme_color = "#d5806b"
     ax_psd_hf.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_psd_hf.xaxis.label.set_color(theme_color)
     ax_psd_hf.title.set_color(theme_color)
-    
+
     ax_psd_hf.sharey(ax_hf_coh)
-    ax_psd_hf.tick_params(labelleft=False) 
+    ax_psd_hf.tick_params(labelleft=False)
 
     # lf coherence (outside)
     ax_lf_coh.plot(xfeats["xcor_lf"], np.arange(nc), "w-")
     ax_lf_coh.plot(
         xfeats["xcor_lf"][(iko := channel_labels == 3)],
         np.arange(nc)[iko],
-        "*", color="#b6d56b", markersize=8
+        "*",
+        color="#b6d56b",
+        markersize=8,
     )
-    
+
     ax_lf_coh.set(xlabel="LF\ncoherence", ylim=[0, nc], title="Outside Brain")
     theme_color = "#b6d56b"
     ax_lf_coh.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_lf_coh.xaxis.label.set_color(theme_color)
     ax_lf_coh.title.set_color(theme_color)
-    
+
     ax_lf_coh.sharey(ax_hf_coh)
     ax_lf_coh.tick_params(labelleft=False)
 
@@ -419,23 +446,23 @@ def show_channels_labels_interactive(
         x_vals = xfeats["mean_abs_volt"] * 1e6
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
-        
-        ax_lf_pow.plot(x_vals, y_vals, "w-") 
-        
+
+        ax_lf_pow.plot(x_vals, y_vals, "w-")
+
         # fill from min and set limits tight to min/max to remove padding gap
         xmin, xmax = np.min(x_vals), np.max(x_vals)
         ax_lf_pow.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_lf_pow.set_xlim(xmin, xmax)
-        
+
         ax_lf_pow.set(xlabel="Mean Absolute\nVoltage (uV)", ylim=[0, nc])
     elif "rms_lf" in xfeats:
         y_vals = np.arange(nc)
         x_vals = xfeats["rms_lf"] * 1e6
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
-        
-        ax_lf_pow.plot(x_vals, y_vals, "w-") 
-        ax_lf_pow.set_xlim(left=0) 
+
+        ax_lf_pow.plot(x_vals, y_vals, "w-")
+        ax_lf_pow.set_xlim(left=0)
         ax_lf_pow.fill_betweenx(y_vals, 0, x_vals, color="white", alpha=0.3)
         ax_lf_pow.set(xlabel="LF Power\n(uV)", ylim=[0, nc])
     else:
@@ -450,14 +477,14 @@ def show_channels_labels_interactive(
         x_vals = xfeats["power_gamma"]
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
-        
+
         ax_gamma_pow.plot(x_vals, y_vals, "w-")
-        
+
         # fill from min and set limits tight to min/max
         xmin, xmax = np.min(x_vals), np.max(x_vals)
         ax_gamma_pow.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_gamma_pow.set_xlim(xmin, xmax)
-        
+
         ax_gamma_pow.set(xlabel="Gamma Power\n(uV²/Hz)", ylim=[0, nc])
     else:
         ax_gamma_pow.text(0.5, 0.5, "N/A", color="white", ha="center")
@@ -469,17 +496,17 @@ def show_channels_labels_interactive(
     if spike_amplitudes is not None:
         y_vals = np.arange(nc)
         # flip sign (extracellular is negative, we want positive magnitude)
-        x_vals = -1 * spike_amplitudes * 1e6 
+        x_vals = -1 * spike_amplitudes * 1e6
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
-        
-        ax_sp_amp.plot(x_vals, y_vals, "w-") 
-        
+
+        ax_sp_amp.plot(x_vals, y_vals, "w-")
+
         # fill from min and set limits tight to min/max
         xmin, xmax = np.min(x_vals), np.max(x_vals)
         ax_sp_amp.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_sp_amp.set_xlim(xmin, xmax)
-        
+
         ax_sp_amp.set(xlabel="Spike Amp\n(uV)", ylim=[0, nc])
     else:
         ax_sp_amp.text(0.5, 0.5, "N/A", color="white", ha="center")
@@ -493,29 +520,28 @@ def show_channels_labels_interactive(
         x_vals = firing_rates
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
-        
+
         ax_fr.plot(x_vals, y_vals, "w-", linewidth=1.5)
         # also remove limits for consistency
         xmin, xmax = np.min(x_vals), np.max(x_vals)
         ax_fr.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_fr.set_xlim(xmin, xmax)
-        
+
         ax_fr.set(xlabel="Firing Rate\n(Hz)", ylim=[0, nc], title="Activity")
     else:
         ax_fr.text(0.5, 0.5, "N/A", color="white", ha="center")
-    
+
     display_color = "#e2b962"
     ax_fr.tick_params(axis="x", labelsize=8.4, colors=display_color)
     ax_fr.xaxis.label.set_color(display_color)
     ax_fr.title.set_color(display_color)
-    
+
     ax_fr.sharey(ax_hf_coh)
     ax_fr.tick_params(labelleft=False)
     ax_fr.grid(True, alpha=0.3)
-    
+
     # ensure "dead channels" has y-ticks
     ax_hf_coh.set(ylabel="Channel")
-    
 
     # --- plot heatmap ---
     heatmap_image = voltageshow(current_raw, fs, ax=ax_heatmap, cax=ax_cbar)
@@ -524,21 +550,28 @@ def show_channels_labels_interactive(
 
     # --- checkbox logic ---
     def on_checkbox_click(event):
-        if event.inaxes not in checkbox_axes: return
+        if event.inaxes not in checkbox_axes:
+            return
         checkbox_idx = checkbox_axes.index(event.inaxes)
         rect = checkbox_rects[checkbox_idx]
-        if rect.get_x() <= event.xdata <= rect.get_x() + rect.get_width() and \
-           rect.get_y() <= event.ydata <= rect.get_y() + rect.get_height():
+        if (
+            rect.get_x() <= event.xdata <= rect.get_x() + rect.get_width()
+            and rect.get_y() <= event.ydata <= rect.get_y() + rect.get_height()
+        ):
             checkbox_states[checkbox_idx] = not checkbox_states[checkbox_idx]
             checkbox_x_marks[checkbox_idx][0].set_visible(checkbox_states[checkbox_idx])
             checkbox_x_marks[checkbox_idx][1].set_visible(checkbox_states[checkbox_idx])
-            
+
             cmr, hp = checkbox_states
-            if cmr and hp: new_data = raw_variants["cmr_hp"]
-            elif cmr: new_data = raw_variants["cmr"]
-            elif hp: new_data = raw_variants["hp"]
-            else: new_data = raw_variants["none"]
-            
+            if cmr and hp:
+                new_data = raw_variants["cmr_hp"]
+            elif cmr:
+                new_data = raw_variants["cmr"]
+            elif hp:
+                new_data = raw_variants["hp"]
+            else:
+                new_data = raw_variants["none"]
+
             heatmap_image.set_data(new_data * 1e6)
             fig.canvas.draw_idle()
 
@@ -547,18 +580,24 @@ def show_channels_labels_interactive(
     # --- buttons ---
     gs_buttons = gs_inner[2].subgridspec(1, 3, width_ratios=[1, 1.5, 1])
     gs_buttons_inner = gs_buttons[0, 1].subgridspec(1, 2, wspace=0.1)
-    
+
     button_ax_save = fig.add_subplot(gs_buttons_inner[0, 0])
     button_ax_nosurface = fig.add_subplot(gs_buttons_inner[0, 1])
-    
-    save_button = Button(button_ax_save, "Save Surface Channel", color="#d1d8a1", hovercolor="#e9f0b3")
-    nosurface_button = Button(button_ax_nosurface, "No Surface (Save -1)", color="#c9c9c9", hovercolor="#ececec")
-    
+
+    save_button = Button(
+        button_ax_save, "Save Surface Channel", color="#d1d8a1", hovercolor="#e9f0b3"
+    )
+    nosurface_button = Button(
+        button_ax_nosurface,
+        "No Surface (Save -1)",
+        color="#c9c9c9",
+        hovercolor="#ececec",
+    )
+
     save_button.label.set_fontsize(10)
     save_button.label.set_fontweight("bold")
     nosurface_button.label.set_fontsize(10)
     nosurface_button.label.set_fontweight("bold")
-
 
     # --- interaction logic ---
     state = {
@@ -574,59 +613,74 @@ def show_channels_labels_interactive(
         for ax_i in all_plot_axes:
             line = ax_i.axhline(
                 auto_surface_rel + 0.5,
-                color=SURFACE_COLOR, linestyle="--", linewidth=2, alpha=0.7,
-                label="Auto surface" if ax_i == ax_heatmap else ""
+                color=SURFACE_COLOR,
+                linestyle="--",
+                linewidth=2,
+                alpha=0.7,
+                label="Auto surface" if ax_i == ax_heatmap else "",
             )
             state["auto_line"].append(line)
         ax_heatmap.legend(loc="lower right", fontsize=10)
 
     # title
     title_text = f"File: {bin_path.name}"
-    if shank_id is not None: title_text += f" | Shank {shank_id+1}"
+    if shank_id is not None:
+        title_text += f" | Shank {shank_id + 1}"
     title_text += f"\nAuto-detected surface channel: {auto_surface_channel}"
     fig.suptitle(title_text, fontsize=14, fontweight="bold", y=0.98, color="#ababab")
-
 
     def on_click(event):
         if event.inaxes in all_plot_axes and event.ydata is not None:
             clicked_ch_rel = int(np.round(event.ydata))
             clicked_ch_rel = max(0, min(nc - 1, clicked_ch_rel))
-            
+
             if shank_channels is not None:
                 clicked_ch_abs = shank_channels[clicked_ch_rel]
             else:
                 clicked_ch_abs = clicked_ch_rel
-            
+
             state["user_surface_channel"] = clicked_ch_abs
             state["final_channel"] = clicked_ch_abs
-            
+
             # remove old lines
-            for line in state["user_line"]: line.remove()
+            for line in state["user_line"]:
+                line.remove()
             state["user_line"] = []
-            
+
             # draw new lines
             for ax_i in all_plot_axes:
                 line = ax_i.axhline(
                     clicked_ch_rel + 0.5,
-                    color=SURFACE_COLOR, linestyle="-", linewidth=3, alpha=0.9,
-                    label="User surface" if ax_i == ax_heatmap else ""
+                    color=SURFACE_COLOR,
+                    linestyle="-",
+                    linewidth=3,
+                    alpha=0.9,
+                    label="User surface" if ax_i == ax_heatmap else "",
                 )
                 state["user_line"].append(line)
-            
+
             ax_heatmap.legend(loc="lower right", fontsize=10)
-            
+
             # update title
             new_title = f"File: {bin_path.name}"
-            if shank_id is not None: new_title += f" | Shank {shank_id+1}"
+            if shank_id is not None:
+                new_title += f" | Shank {shank_id + 1}"
             new_title += f"\nAuto: {auto_surface_channel}  |  User: {clicked_ch_abs}"
-            fig.suptitle(new_title, fontsize=14, fontweight="bold", y=0.98, color="#ababab")
+            fig.suptitle(
+                new_title, fontsize=14, fontweight="bold", y=0.98, color="#ababab"
+            )
             fig.canvas.draw_idle()
 
     # hover logic needs to handle the 2 rows
     hover_text = fig.text(
-        0.01, 0.01, "",
-        fontsize=10, family="monospace", verticalalignment="bottom",
-        color="white", bbox=dict(boxstyle="round", facecolor="#404040", alpha=0.9, edgecolor="white")
+        0.01,
+        0.01,
+        "",
+        fontsize=10,
+        family="monospace",
+        verticalalignment="bottom",
+        color="white",
+        bbox=dict(boxstyle="round", facecolor="#404040", alpha=0.9, edgecolor="white"),
     )
 
     def on_hover(event):
@@ -636,8 +690,9 @@ def show_channels_labels_interactive(
             return
 
         ch = int(np.round(event.ydata))
-        if not (0 <= ch < nc): return
-        
+        if not (0 <= ch < nc):
+            return
+
         txt = ""
         if event.inaxes == ax_hf_coh:
             txt = f"Ch {ch}: HF coherence = {xfeats['xcor_hf'][ch]:.4f}"
@@ -646,21 +701,21 @@ def show_channels_labels_interactive(
         elif event.inaxes == ax_lf_coh:
             txt = f"Ch {ch}: LF coherence = {xfeats['xcor_lf'][ch]:.4f}"
         elif event.inaxes == ax_lf_pow and "rms_lf" in xfeats:
-            txt = f"Ch {ch}: LF Power = {xfeats['rms_lf'][ch]*1e6:.1f} uV"
+            txt = f"Ch {ch}: LF Power = {xfeats['rms_lf'][ch] * 1e6:.1f} uV"
         elif event.inaxes == ax_gamma_pow and "power_gamma" in xfeats:
             txt = f"Ch {ch}: Gamma Power = {xfeats['power_gamma'][ch]:.2f} uV²/Hz"
         elif event.inaxes == ax_sp_amp and spike_amplitudes is not None:
-            txt = f"Ch {ch}: Spike Amp = {spike_amplitudes[ch]*1e6:.1f} uV"
+            txt = f"Ch {ch}: Spike Amp = {spike_amplitudes[ch] * 1e6:.1f} uV"
         elif event.inaxes == ax_fr and firing_rates is not None:
             txt = f"Ch {ch}: Firing Rate = {firing_rates[ch]:.1f} Hz"
         elif event.inaxes == ax_heatmap:
             x_time = event.xdata
-            if 0 <= x_time <= ns_plot/fs:
+            if 0 <= x_time <= ns_plot / fs:
                 idx = int(x_time * fs)
                 if idx < ns_plot:
                     val = raw[ch, idx] * 1e6
                     txt = f"Ch {ch}, t={x_time:.3f}s: {val:.1f} uV"
-        
+
         hover_text.set_text(txt)
         fig.canvas.draw_idle()
 
@@ -669,7 +724,9 @@ def show_channels_labels_interactive(
 
     def save_plot():
         if shank_id is not None:
-            fname = bin_path.with_suffix("").with_suffix(f".SURFACE_SHANK{shank_id}.png")
+            fname = bin_path.with_suffix("").with_suffix(
+                f".SURFACE_SHANK{shank_id}.png"
+            )
         else:
             fname = bin_path.with_suffix("").with_suffix(".SURFACE.png")
         fig.savefig(fname, dpi=150, bbox_inches="tight")
@@ -691,8 +748,8 @@ def show_channels_labels_interactive(
     save_button.on_clicked(on_save)
     nosurface_button.on_clicked(on_no_surface)
 
-    plt.show() 
-    
+    plt.show()
+
     if not state["saved"]:
         print("Window closed without saving. Using auto-detected channel.")
         save_plot()

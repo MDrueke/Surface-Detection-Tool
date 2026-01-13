@@ -13,17 +13,13 @@ The tool is currently limited to data acquired with SpikeGLX. Contact me if you 
 
 ![Surface Detection Example](example.png)
 
-## Requirements
+## Installation
+
+To install the tool locally:
 
 ```bash
-pip install -r requirements.txt
+pip install .
 ```
-
-Required packages:
-- numpy
-- scipy
-- matplotlib
-- mtscomp (for reading .cbin compressed files)
 
 ## Usage
 
@@ -32,13 +28,13 @@ Required packages:
 Run without arguments to launch the file picker and options dialog:
 
 ```bash
-python main.py
+surface-detection
 ```
 
 ### Command Line Mode
 
 ```bash
-python main.py /path/to/recording.ap.bin [OPTIONS]
+surface-detection /path/to/recording.ap.bin [OPTIONS]
 ```
 
 ### Command Line Options
@@ -47,9 +43,9 @@ python main.py /path/to/recording.ap.bin [OPTIONS]
 - `PATH` or `--bin_file PATH` - Path to the .ap.bin or .ap.cbin file
 
 **Detection preprocessing:**
-- `--cmr` - Apply Common Median Referencing to data before running detection algorithms
-- `--hf FREQUENCY` - Apply highpass filter (Hz) to data before detection (e.g., `--hf 300`)
-- `--n_chunks N` - Number of time chunks to analyze (default: 20)
+- `--cmr` - Apply Common Median Referencing to data BEFORE running detection algorithms. This interferes with Noisy Channel detection though.
+- `--hf FREQUENCY` - Apply highpass filter (Hz) to data BEFORE detection (e.g., `--hf 300`). This might interfere with Noisy/Dead Channel detection.
+- `--n_chunks N` - Number of time chunks to analyze (default: 40)
 - `--spike_threshold THRESH` - Spike detection threshold in multiples of MAD (default: -6.0)
 - `-t` or `--time_slice START END` - Time window to analyze:
     - **Proportions**: Use values <= 1.0 (e.g., `-t 0.0 0.1` for first 10%)
@@ -62,17 +58,17 @@ python main.py /path/to/recording.ap.bin [OPTIONS]
 
 **Basic usage:**
 ```bash
-python main.py
+surface-detection
 ```
 
 **Analyze specific time window (0-600s) with common median referencing:**
 ```bash
-python main.py recording.ap.bin --cmr -t 0 600
+surface-detection recording.ap.bin --cmr -t 0 600
 ```
 
 **Debug mode:**
 ```bash
-python main.py recording.ap.bin --debug
+surface-detection recording.ap.bin --debug
 ```
 
 ## Interactive Plot

@@ -123,6 +123,117 @@ def get_options_dialog(cmr_default=False, hf_default=None):
     return result
 
 
+def get_channel_subset(args_cr, shank_info, sr):
+    """
+    Determine the subset of absolute channel indices to process based on -cr arguments.
+
+    :param args_cr: List of integers provided to --channel-range
+    :param shank_info: Dictionary {shank_id: [channel_indices]} from get_shank_info
+    :param sr: Reader object
+    :return: List of absolute channel indices, or None if no restriction
+    """
+    if not args_cr:
+        return None
+
+    # Validation: Must be pairs
+    if len(args_cr) % 2 != 0:
+        print(
+            "\033[91mError: --channel-range arguments must be pairs of (start, end).\033[0m"
+        )
+        sys.exit(1)
+
+    num_pairs = len(args_cr) // 2
+    pairs = [(args_cr[i], args_cr[i + 1]) for i in range(0, len(args_cr), 2)]
+
+    # Sort pairs to ensure logic works if user gives weird order? No, keep user order or assume mapping.
+
+    # Total available channels (excluding sync usually handled by reader, but geometry has all)
+    # We rely on shank_info for structure.
+
+    # Case 0: Single Shank / No Shank Info
+    if shank_info is None or len(shank_info) <= 1:
+        if num_pairs > 1:
+            print(
+                "\033[91mWarning: Multiple channel ranges provided for a single-shank probe. "
+                f"Using only the first range {pairs[0]}.\033[0m"
+            )
+            # Use only first pair
+            pairs = [pairs[0]]
+
+        start, end = pairs[0]
+        # Basic validation
+        if start < 0 or end > sr.nc:
+            print(
+                f"\033[91mError: Channel range {start}-{end} out of bounds (0-{sr.nc}).\033[0m"
+            )
+            sys.exit(1)
+
+        return np.arange(start, end)
+
+    # Case 1: Multi-Shank
+    num_shanks = len(shank_info)
+    sorted_shank_ids = sorted(shank_info.keys())
+
+    subset_indices = []
+
+    if num_pairs == 1:
+        # Apply same relative range to ALL shanks
+        rel_start, rel_end = pairs[0]
+        print(
+            f"Applying relative channel range {rel_start}-{rel_end} to all {num_shanks} shanks."
+        )
+
+        for shank_id in sorted_shank_ids:
+            channels = shank_info[shank_id]  # these are absolute indices on this shank
+            # we assume channels are sorted by geometric position bottom-up usually,
+            # but let's just slice the array of channels for this shank
+
+            # Bounds check relative to shank size
+            if rel_start < 0 or rel_end > len(channels):
+                print(
+                    f"\033[91mWarning: Range {rel_start}-{rel_end} is out of bounds for Shank {shank_id} (size {len(channels)}).\033[0m"
+                )
+                # Clip or Skip? Let's clip to be safe
+                s = max(0, rel_start)
+                e = min(len(channels), rel_end)
+            else:
+                s, e = rel_start, rel_end
+
+            if s < e:
+                subset_indices.extend(channels[s:e])
+
+    elif num_pairs == num_shanks:
+        # Apply specific range to each shank
+        print(f"Applying {num_pairs} specific ranges to {num_shanks} shanks.")
+
+        for i, shank_id in enumerate(sorted_shank_ids):
+            rel_start, rel_end = pairs[i]
+            channels = shank_info[shank_id]
+
+            # Bounds check
+            if rel_start < 0 or rel_end > len(channels):
+                print(
+                    f"\033[91mWarning: Range {rel_start}-{rel_end} is out of bounds for Shank {shank_id}.\033[0m"
+                )
+                s = max(0, rel_start)
+                e = min(len(channels), rel_end)
+            else:
+                s, e = rel_start, rel_end
+
+            if s < e:
+                subset_indices.extend(channels[s:e])
+
+    else:
+        # Ambiguous count
+        print(
+            f"\033[91mError: Mismatch in channel ranges. Probe has {num_shanks} shanks, but {num_pairs} ranges provided. "
+            "Provide either 1 range (for all) or N ranges (one per shank).\033[0m"
+        )
+        sys.exit(1)
+
+    return np.array(sorted(subset_indices))  # Return sorted absolute indices
+
+
 def get_bin_file_path_and_options():
     """
     Get the path to a .bin file and processing options either from command line or via dialogs.
@@ -171,6 +282,16 @@ def get_bin_file_path_and_options():
         type=float,
         help="Time window to analyze. Either as proportions (0.0-1.0) or seconds (0-total). E.g. '-t 0.8 1' or '-t 4500 7000'",
     )
+    parser.add_argument(
+        "-cr",
+        "--channel_range",
+        nargs="+",
+        type=int,
+        help="Channel restriction. Provide pairs of (start end). "
+        "If 1 pair is given for multi-shank, it applies to all shanks. "
+        "If N pairs are given, they apply to each shank respectively.",
+    )
+
     args = parser.parse_args()
 
     hf_cutoff = None
@@ -209,6 +330,9 @@ def get_bin_file_path_and_options():
             else:
                 time_slice = ("seconds", t1, t2)
 
+        # We cannot resolve channel_subset here fully without opening the file to get shank_info.
+        # So we pass args.channel_range raw and handle it in main()
+
         return bin_path, {
             "cmr": args.cmr,
             "hf_cutoff": hf_cutoff,
@@ -216,6 +340,7 @@ def get_bin_file_path_and_options():
             "n_chunks": args.n_chunks,
             "spike_threshold": args.spike_threshold,
             "time_slice": time_slice,
+            "channel_range": args.channel_range,
         }
     else:
         print("No file specified, opening file dialog...")
@@ -248,15 +373,40 @@ def get_bin_file_path_and_options():
         # spike_threshold will be whatever default is passed to analyze_recording or hardcoded here
         options["spike_threshold"] = -6
         options["time_slice"] = None
+        options["channel_range"] = (
+            None  # GUI doesn't support this yet based on original code, leave None
+        )
 
         return Path(file_path), options
 
 
-def save_surface_channel(bin_path, surface_results, is_multi_shank=False):
+def format_cr_suffix(channel_range_args):
+    """
+    Format the channel range arguments into a filename suffix.
+    Example: [100, 200] -> "_cr_100-200"
+    """
+    if not channel_range_args:
+        return ""
+
+    pairs = []
+    for i in range(0, len(channel_range_args), 2):
+        if i + 1 < len(channel_range_args):
+            pairs.append(f"{channel_range_args[i]}-{channel_range_args[i + 1]}")
+
+    return "_cr_" + "_".join(pairs)
+
+
+def save_surface_channel(
+    bin_path, surface_results, is_multi_shank=False, channel_range_suffix=""
+):
     """
     Save the surface channel(s) to a text file next to the .bin file.
     """
-    output_file = bin_path.with_suffix("").with_suffix(".surface_channel.txt")
+    # Filename structure: <name><suffix>.surface_channel.txt
+    # Example: recording.ap_cr_100-200.surface_channel.txt
+    output_file = bin_path.parent / (
+        bin_path.stem + channel_range_suffix + ".surface_channel.txt"
+    )
 
     with open(output_file, "w") as f:
         if is_multi_shank:
@@ -280,6 +430,18 @@ def main():
     if options["cmr"]:
         print("Applying Common Median Referencing (CMR)")
 
+    channel_range_suffix = format_cr_suffix(options.get("channel_range"))
+
+    # Open reader briefly to get geometry and shank info for subsetting
+    with Reader(bin_path) as sr:
+        shank_info = get_shank_info(sr.geometry)
+        channel_subset = get_channel_subset(
+            options.get("channel_range"), shank_info, sr
+        )
+
+    if channel_subset is not None:
+        print(f"Restricting analysis to {len(channel_subset)} channels.")
+
     with Reader(bin_path) as sr:
         channel_labels, xfeats, raw, fs, firing_rates, spike_amplitudes = (
             analyze_recording(
@@ -289,6 +451,7 @@ def main():
                 apply_cmr_flag=options["cmr"],
                 debug=options["debug"],
                 time_slice=options["time_slice"],
+                channel_subset=channel_subset,
             )
         )
 
@@ -306,7 +469,8 @@ def main():
             print(f"Debug data saved to: {debug_file}")
             print(f"  Available keys: {list(xfeats['debug'].keys())}")
 
-        shank_info = get_shank_info(sr.geometry)
+        # Note: shank_info was already computed above, but safe to do it from current sr
+        # shank_info = get_shank_info(sr.geometry)
 
         probe_version = sr.version if hasattr(sr, "version") else "Unknown"
         num_active_shanks = len(shank_info) if shank_info is not None else 1
@@ -314,6 +478,13 @@ def main():
 
         if shank_info is None or len(shank_info) == 1:
             auto_surface_channel = find_surface_channel(channel_labels)
+
+            # Map relative index (if subset) to absolute
+            if auto_surface_channel != -1 and channel_subset is not None:
+                # channel_labels is sized to the subset. find_surface_channel returns index into this array.
+                # We need to map it back to absolute.
+                auto_surface_channel = channel_subset[auto_surface_channel]
+
             if auto_surface_channel == -1:
                 print("No surface channel detected")
             else:
@@ -329,11 +500,15 @@ def main():
                 firing_rates=firing_rates,
                 spike_amplitudes=spike_amplitudes,
                 hf_cutoff=options["hf_cutoff"],
+                channel_range_suffix=channel_range_suffix,
             )
 
             if final_surface_channel is not None:
                 save_surface_channel(
-                    bin_path, final_surface_channel, is_multi_shank=False
+                    bin_path,
+                    final_surface_channel,
+                    is_multi_shank=False,
+                    channel_range_suffix=channel_range_suffix,
                 )
 
         else:
@@ -347,19 +522,54 @@ def main():
                     f"\n=== Processing Shank {shank_id} ({len(shank_channels)} channels) ==="
                 )
 
-                raw_shank, labels_shank, xfeats_shank = filter_data_by_shank(
-                    raw, channel_labels, xfeats, shank_channels
-                )
+                # Filter data by shank
+                # Wait! If we already subsetted the data in analyze_recording,
+                # 'raw', 'channel_labels', 'xfeats' only contain the subset channels.
+                # 'shank_channels' contains ALL channels for that shank.
+                # We need to intersect 'shank_channels' with our 'channel_subset' to find
+                # which columns of 'raw' belong to this shank.
 
-                firing_rates_shank = firing_rates[shank_channels]
-                spike_amplitudes_shank = spike_amplitudes[shank_channels]
+                # If channel_subset is used, xfeats['ind'] contains the absolute indices.
+                # We can use that to match.
+
+                current_indices = xfeats.get("ind", np.arange(len(channel_labels)))
+
+                # Find indices in the CURRENT arrays that belong to this shank
+                # i.e., where current_indices is in shank_channels
+                mask = np.isin(current_indices, shank_channels)
+
+                if np.sum(mask) == 0:
+                    print(
+                        f"No channels from Shank {shank_id} selected in current subset. Skipping."
+                    )
+                    continue
+
+                # These are boolean masks or indices into the SUBSET arrays
+                indices_in_subset = np.where(mask)[0]
+
+                # Slice the already subsetted data
+                raw_shank = raw[indices_in_subset, :]
+                labels_shank = channel_labels[indices_in_subset]
+
+                xfeats_shank = {}
+                for key, val in xfeats.items():
+                    xfeats_shank[key] = val[indices_in_subset]  # Works for 'ind' too
+
+                firing_rates_shank = firing_rates[indices_in_subset]
+                spike_amplitudes_shank = spike_amplitudes[indices_in_subset]
+
+                # Current absolute channels for this shank in this subset
+                shank_channels_subset = current_indices[indices_in_subset]
 
                 auto_surface_local = find_surface_channel(labels_shank)
 
                 if auto_surface_local == -1:
                     auto_surface_abs = -1
                 else:
-                    auto_surface_abs = shank_channels[auto_surface_local]
+                    # Map local index back to absolute
+                    # auto_surface_local is index into labels_shank (0..N)
+                    # shank_channels_subset contains the absolute indices corresponding to labels_shank
+                    auto_surface_abs = shank_channels_subset[auto_surface_local]
 
                 if auto_surface_abs == -1:
                     print("No surface channel detected")
@@ -377,16 +587,22 @@ def main():
                     spike_amplitudes=spike_amplitudes_shank,
                     shank_id=shank_id,
                     total_shanks=num_shanks,
-                    shank_channels=shank_channels,
+                    shank_channels=shank_channels_subset,  # Pass the subset of shank channels
                     hf_cutoff=options["hf_cutoff"],
+                    channel_range_suffix=channel_range_suffix,
                 )
 
                 if final_surface_abs == -1:
                     final_surface_rel = -1
                 else:
-                    final_surface_rel = np.where(shank_channels == final_surface_abs)[
-                        0
-                    ][0]
+                    # Find relative index on the FULL shank (0..95 usually)
+                    # We look it up in the original complete shank_channels
+                    # assuming final_surface_abs is a valid channel on this shank
+                    rel_idx = np.where(shank_channels == final_surface_abs)[0]
+                    if len(rel_idx) > 0:
+                        final_surface_rel = rel_idx[0]
+                    else:
+                        final_surface_rel = -1
 
                 surface_results.append(
                     {
@@ -400,7 +616,12 @@ def main():
                     f"Shank {shank_id}: Surface channel = {final_surface_abs} (on-shank: {final_surface_rel})"
                 )
 
-            save_surface_channel(bin_path, surface_results, is_multi_shank=True)
+            save_surface_channel(
+                bin_path,
+                surface_results,
+                is_multi_shank=True,
+                channel_range_suffix=channel_range_suffix,
+            )
 
 
 if __name__ == "__main__":

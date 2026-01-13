@@ -65,14 +65,24 @@ def process_chunk(
     spike_threshold,
     apply_cmr_flag,
     debug,
+    channel_subset=None,
 ):
     """
     Worker function to process a single chunk of data.
     """
     # Re-open reader in worker process
     with Reader(bin_file_path) as sr:
-        nc = sr.nc - sr.nsync
         fs = sr.fs
+
+        # Determine which channels to read
+        if channel_subset is not None:
+            channels_to_read = channel_subset
+            nc = len(channels_to_read)
+        else:
+            # Default: read all AP channels (exclude sync if at end)
+            nc_total = sr.nc - sr.nsync
+            channels_to_read = slice(0, nc_total)
+            nc = nc_total
 
         # Pre-calculate filter coefficients (same as before)
         sos_hp = scipy.signal.butter(
@@ -83,7 +93,10 @@ def process_chunk(
         )
 
         sl = slice(int(t0 * fs), int((t0 + batch_duration) * fs))
-        raw = sr[sl, :nc].T
+
+        # Read data
+        # sr[slice, channels] returns (ns, nc), we want (nc, ns)
+        raw = sr[sl, channels_to_read].T
 
         raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
 
@@ -161,8 +174,14 @@ def process_chunk(
         # mav (activity - strictly preprocessed)
         mean_abs_volt = np.mean(np.abs(hf_activity), axis=-1)
 
+        # Use actual channel indices if available, else 0..nc
+        if channel_subset is not None:
+            feat_ind = np.array(channel_subset)
+        else:
+            feat_ind = np.arange(nc)
+
         chunk_xfeats = {
-            "ind": np.arange(nc),
+            "ind": feat_ind,
             "rms_raw": rms(raw_features),
             "rms_lf": rms(lf_features),
             "power_gamma": power_gamma,
@@ -228,12 +247,14 @@ def analyze_recording(
     apply_cmr_flag=False,
     debug=False,
     time_slice=None,
+    channel_subset=None,
 ):
     """
     Unified analysis function.
 
     :param time_slice: Optional tuple ("seconds"|"proportion", start, end).
                        Restricts analysis to this time window.
+    :param channel_subset: Optional list of absolute channel indices to analyze.
     :return: channel_flags, xfeats_median, raw_best_chunk, fs, firing_rates, spike_amplitudes
     """
     # handle bin_file object or path
@@ -248,13 +269,20 @@ def analyze_recording(
         bin_file_path = Path(bin_file)
         sr = Reader(bin_file_path)
 
-    nc = sr.nc - sr.nsync
+    # Determine NC based on subset
+    if channel_subset is not None:
+        nc = len(channel_subset)
+    else:
+        nc = sr.nc - sr.nsync
+
     fs = sr.fs
 
     # Calculate n_jobs
     # Estimate memory: ~111MB per job for 0.4s chunk. Scale linearly.
     # Base: 385 ch * 30000 Hz * 0.4s * 4 bytes * 6 copies approx 111MB
-    estimated_mem_per_job = nc * fs * batch_duration * 4 * 6
+    # Scale by channel count if reduced
+    ch_ratio = nc / (sr.nc - sr.nsync)
+    estimated_mem_per_job = (sr.nc - sr.nsync) * ch_ratio * fs * batch_duration * 4 * 6
     available_mem = psutil.virtual_memory().available
     max_jobs_mem = int(available_mem / estimated_mem_per_job)
     max_jobs_cpu = multiprocessing.cpu_count() - 1
@@ -316,6 +344,7 @@ def analyze_recording(
                 spike_threshold,
                 apply_cmr_flag,
                 debug,
+                channel_subset,
             ): i
             for i, t0 in enumerate(chunk_starts)
         }
@@ -371,9 +400,15 @@ def analyze_recording(
         else:
             spike_amplitudes[ch] = 0
 
-    xfeats_median = {"ind": np.arange(nc)}
+    if channel_subset is not None:
+        final_ind = np.array(channel_subset)
+    else:
+        final_ind = np.arange(nc)
+
+    xfeats_median = {"ind": final_ind}
     for k, v_list in xfeats_accumulator.items():
-        xfeats_median[k] = np.median(np.stack(v_list, axis=1), axis=1)
+        if k != "ind":
+            xfeats_median[k] = np.median(np.stack(v_list, axis=1), axis=1)
 
     channel_flags, _ = scipy.stats.mode(channel_labels_all, axis=1)
     channel_flags = channel_flags.flatten()
@@ -387,13 +422,16 @@ def analyze_recording(
     # Read best chunk raw data for plotting
     best_chunk_raw = None
     if best_chunk_t0 != -1:
-        # Re-use sr if it's available, or open new one
-        # If bin_file was a path, sr is a local Reader we made. If it was passed in, it's that one.
-        # But caution: if passed in, we should check if it's still good.
-        # Reader is context manager but we handled it.
-
         sl = slice(int(best_chunk_t0 * fs), int((best_chunk_t0 + batch_duration) * fs))
-        raw = sr[sl, :nc].T
+
+        # Determine read channels again locally
+        if channel_subset is not None:
+            channels_to_read = channel_subset
+        else:
+            nc_total = sr.nc - sr.nsync
+            channels_to_read = slice(0, nc_total)
+
+        raw = sr[sl, channels_to_read].T
         raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]
 
         if apply_cmr_flag:
@@ -402,7 +440,6 @@ def analyze_recording(
             best_chunk_raw = raw
 
     # If we created the reader locally, close it.
-    # If it was passed in, leave it open (responsibility of caller).
     if not isinstance(bin_file, Reader):
         sr.close()
 

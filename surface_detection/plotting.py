@@ -157,6 +157,7 @@ def voltageshow(
     cbar_label="Voltage (uV)",
     scaling=1e6,
     vrange=None,
+    extent=None,
     **axis_kwargs,
 ):
     """
@@ -172,6 +173,10 @@ def voltageshow(
     nc, ns = raw.shape
     default_vrange = LF_RANGE_UV if fs < 2600 else AP_RANGE_UV
     vrange = vrange if vrange is not None else default_vrange
+
+    if extent is None:
+        extent = [0, ns / fs, 0, nc]
+
     im = ax.imshow(
         raw * scaling,
         origin="lower",
@@ -179,7 +184,7 @@ def voltageshow(
         aspect="auto",
         vmin=-vrange,
         vmax=vrange,
-        extent=[0, ns / fs, 0, nc],
+        extent=extent,
     )
     # set the axis properties: we use defaults values that can be overridden by user-provided ones
     axis_kwargs = dict(ylim=[0, nc], xlabel="Time (s)", ylabel="Channel") | axis_kwargs
@@ -206,6 +211,7 @@ def show_channels_labels_interactive(
     similarity_threshold=(-0.5, 1),
     psd_hf_threshold=0.02,
     hf_cutoff=None,
+    channel_range_suffix="",
 ):
     """
     Interactive version of show_channels_labels that allows user to manually select
@@ -214,7 +220,7 @@ def show_channels_labels_interactive(
     :param raw: Raw data [nc, ns]
     :param fs: Sampling frequency
     :param channel_labels: Channel labels array
-    :param xfeats: Dictionary of features
+    :param xfeats: Dictionary of features. Must contain 'ind' with real channel indices.
     :param auto_surface_channel: Auto-detected surface channel (absolute index)
     :param bin_path: Path to the bin file (for window title)
     :param firing_rates: Optional array of firing rates [nc]
@@ -225,9 +231,14 @@ def show_channels_labels_interactive(
     :param similarity_threshold: Tuple of thresholds for dead/noisy detection
     :param psd_hf_threshold: Threshold for high-frequency PSD
     :param hf_cutoff: Optional highpass cutoff frequency (Hz) for heatmap visualization
+    :param channel_range_suffix: Suffix to append to saved filename if filtered
     :return: Final surface channel selected (absolute index), or None if cancelled
     """
     nc, ns = raw.shape
+
+    # Retrieve actual channel indices from xfeats, or default to 0..nc
+    channel_indices = xfeats.get("ind", np.arange(nc))
+
     raw_original = raw.copy()
     raw = raw - np.mean(raw, axis=-1)[:, np.newaxis]  # removes dc offset
 
@@ -256,17 +267,16 @@ def show_channels_labels_interactive(
     # start with cmr + highpass as defaults
     current_raw = raw_variants["cmr_hp"]
 
-    # convert absolute surface channel to relative position for plotting (if multi-shank)
-    if shank_channels is not None and auto_surface_channel != -1:
-        # find the position of auto_surface_channel within shank_channels
-        auto_surface_rel = np.where(shank_channels == auto_surface_channel)[0]
-        if len(auto_surface_rel) > 0:
-            auto_surface_rel = auto_surface_rel[0]
-        else:
-            auto_surface_rel = -1
-    else:
-        # single-shank or no surface: use absolute as-is
-        auto_surface_rel = auto_surface_channel
+    # convert absolute surface channel to relative position for plotting
+    # We need the relative index within the `channel_indices` array
+    # If using subset, `auto_surface_channel` (absolute) needs to be mapped to row index.
+
+    auto_surface_rel = -1
+    if auto_surface_channel != -1:
+        # Check if the auto surface channel is even in our current view
+        matches = np.where(channel_indices == auto_surface_channel)[0]
+        if len(matches) > 0:
+            auto_surface_rel = matches[0]
 
     fig = plt.figure(figsize=(13, 9))
 
@@ -384,35 +394,59 @@ def show_channels_labels_interactive(
     # --- plot features ---
 
     # hf coherence (dead)
-    ax_hf_coh.plot(xfeats["xcor_hf"], np.arange(nc), "w-")
+    ax_hf_coh.plot(xfeats["xcor_hf"], channel_indices, "w-")
     ax_hf_coh.plot(
         xfeats["xcor_hf"][(iko := channel_labels == 1)],
-        np.arange(nc)[iko],
+        channel_indices[iko],
         "*",
         color="#75a1d2",
         markersize=8,
     )
-    ax_hf_coh.plot(similarity_threshold[0] * np.ones(2), [0, nc], "--", color="gray")
-    ax_hf_coh.plot(similarity_threshold[1] * np.ones(2), [0, nc], "--", color="gray")
+    # The thresholds are vertical lines, y-axis is channel indices
+    ax_hf_coh.plot(
+        similarity_threshold[0] * np.ones(2),
+        [channel_indices[0], channel_indices[-1]],
+        "--",
+        color="gray",
+    )
+    ax_hf_coh.plot(
+        similarity_threshold[1] * np.ones(2),
+        [channel_indices[0], channel_indices[-1]],
+        "--",
+        color="gray",
+    )
 
-    ax_hf_coh.set(xlabel="HF\ncoherence", ylim=[0, nc], title="Dead Channels")
+    ax_hf_coh.set(
+        xlabel="HF\ncoherence",
+        ylim=[channel_indices[0], channel_indices[-1]],
+        title="Dead Channels",
+    )
     theme_color = "#75a1d2"
     ax_hf_coh.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_hf_coh.xaxis.label.set_color(theme_color)
     ax_hf_coh.title.set_color(theme_color)
 
     # psd hf (noisy)
-    ax_psd_hf.plot(xfeats["psd_hf"], np.arange(nc), "w-")
+    ax_psd_hf.plot(xfeats["psd_hf"], channel_indices, "w-")
     ax_psd_hf.plot(
         xfeats["psd_hf"][(iko := xfeats["psd_hf"] > psd_hf_threshold)],
-        np.arange(nc)[iko],
+        channel_indices[iko],
         "*",
         color="#d5806b",
         markersize=8,
     )
-    ax_psd_hf.plot(psd_hf_threshold * np.array([1, 1]), [0, nc], "--", color="gray")
+    ax_psd_hf.plot(
+        psd_hf_threshold * np.array([1, 1]),
+        [channel_indices[0], channel_indices[-1]],
+        "--",
+        color="gray",
+    )
 
-    ax_psd_hf.set(xlabel="HF\npower", ylim=[0, nc], title="Noisy Channels")
+    ax_psd_hf.set(
+        xlabel="HF\npower",
+        ylim=[channel_indices[0], channel_indices[-1]],
+        title="Noisy Channels",
+    )
     theme_color = "#d5806b"
     ax_psd_hf.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_psd_hf.xaxis.label.set_color(theme_color)
@@ -422,16 +456,20 @@ def show_channels_labels_interactive(
     ax_psd_hf.tick_params(labelleft=False)
 
     # lf coherence (outside)
-    ax_lf_coh.plot(xfeats["xcor_lf"], np.arange(nc), "w-")
+    ax_lf_coh.plot(xfeats["xcor_lf"], channel_indices, "w-")
     ax_lf_coh.plot(
         xfeats["xcor_lf"][(iko := channel_labels == 3)],
-        np.arange(nc)[iko],
+        channel_indices[iko],
         "*",
         color="#b6d56b",
         markersize=8,
     )
 
-    ax_lf_coh.set(xlabel="LF\ncoherence", ylim=[0, nc], title="Outside Brain")
+    ax_lf_coh.set(
+        xlabel="LF\ncoherence",
+        ylim=[channel_indices[0], channel_indices[-1]],
+        title="Outside Brain",
+    )
     theme_color = "#b6d56b"
     ax_lf_coh.tick_params(axis="x", colors=theme_color, labelsize=8.4)
     ax_lf_coh.xaxis.label.set_color(theme_color)
@@ -442,7 +480,7 @@ def show_channels_labels_interactive(
 
     # mav (mean absolute voltage) - replaces lf power
     if "mean_abs_volt" in xfeats:
-        y_vals = np.arange(nc)
+        y_vals = channel_indices
         x_vals = xfeats["mean_abs_volt"] * 1e6
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
@@ -454,9 +492,12 @@ def show_channels_labels_interactive(
         ax_lf_pow.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_lf_pow.set_xlim(xmin, xmax)
 
-        ax_lf_pow.set(xlabel="Mean Absolute\nVoltage (uV)", ylim=[0, nc])
+        ax_lf_pow.set(
+            xlabel="Mean Absolute\nVoltage (uV)",
+            ylim=[channel_indices[0], channel_indices[-1]],
+        )
     elif "rms_lf" in xfeats:
-        y_vals = np.arange(nc)
+        y_vals = channel_indices
         x_vals = xfeats["rms_lf"] * 1e6
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
@@ -464,7 +505,9 @@ def show_channels_labels_interactive(
         ax_lf_pow.plot(x_vals, y_vals, "w-")
         ax_lf_pow.set_xlim(left=0)
         ax_lf_pow.fill_betweenx(y_vals, 0, x_vals, color="white", alpha=0.3)
-        ax_lf_pow.set(xlabel="LF Power\n(uV)", ylim=[0, nc])
+        ax_lf_pow.set(
+            xlabel="LF Power\n(uV)", ylim=[channel_indices[0], channel_indices[-1]]
+        )
     else:
         ax_lf_pow.text(0.5, 0.5, "N/A", color="white", ha="center")
     ax_lf_pow.tick_params(axis="x", labelsize=8.4, colors="white")
@@ -473,7 +516,7 @@ def show_channels_labels_interactive(
 
     # gamma power
     if "power_gamma" in xfeats:
-        y_vals = np.arange(nc)
+        y_vals = channel_indices
         x_vals = xfeats["power_gamma"]
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
@@ -485,7 +528,10 @@ def show_channels_labels_interactive(
         ax_gamma_pow.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_gamma_pow.set_xlim(xmin, xmax)
 
-        ax_gamma_pow.set(xlabel="Gamma Power\n(uV²/Hz)", ylim=[0, nc])
+        ax_gamma_pow.set(
+            xlabel="Gamma Power\n(uV²/Hz)",
+            ylim=[channel_indices[0], channel_indices[-1]],
+        )
     else:
         ax_gamma_pow.text(0.5, 0.5, "N/A", color="white", ha="center")
     ax_gamma_pow.tick_params(axis="x", labelsize=8.4, colors="white")
@@ -494,7 +540,7 @@ def show_channels_labels_interactive(
 
     # spike amplitude
     if spike_amplitudes is not None:
-        y_vals = np.arange(nc)
+        y_vals = channel_indices
         # flip sign (extracellular is negative, we want positive magnitude)
         x_vals = -1 * spike_amplitudes * 1e6
         # smoothing
@@ -507,7 +553,9 @@ def show_channels_labels_interactive(
         ax_sp_amp.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_sp_amp.set_xlim(xmin, xmax)
 
-        ax_sp_amp.set(xlabel="Spike Amp\n(uV)", ylim=[0, nc])
+        ax_sp_amp.set(
+            xlabel="Spike Amp\n(uV)", ylim=[channel_indices[0], channel_indices[-1]]
+        )
     else:
         ax_sp_amp.text(0.5, 0.5, "N/A", color="white", ha="center")
     ax_sp_amp.tick_params(axis="x", labelsize=8.4, colors="white")
@@ -516,7 +564,7 @@ def show_channels_labels_interactive(
 
     # firing rate
     if firing_rates is not None:
-        y_vals = np.arange(nc)
+        y_vals = channel_indices
         x_vals = firing_rates
         # smoothing
         x_vals = gaussian_filter1d(x_vals, sigma=SMOOTHING_SIGMA)
@@ -527,7 +575,11 @@ def show_channels_labels_interactive(
         ax_fr.fill_betweenx(y_vals, xmin, x_vals, color="white", alpha=0.3)
         ax_fr.set_xlim(xmin, xmax)
 
-        ax_fr.set(xlabel="Firing Rate\n(Hz)", ylim=[0, nc], title="Activity")
+        ax_fr.set(
+            xlabel="Firing Rate\n(Hz)",
+            ylim=[channel_indices[0], channel_indices[-1]],
+            title="Activity",
+        )
     else:
         ax_fr.text(0.5, 0.5, "N/A", color="white", ha="center")
 
@@ -544,7 +596,26 @@ def show_channels_labels_interactive(
     ax_hf_coh.set(ylabel="Channel")
 
     # --- plot heatmap ---
-    heatmap_image = voltageshow(current_raw, fs, ax=ax_heatmap, cax=ax_cbar)
+    # Update heatmap to use proper extent matching real channel indices
+    # extent = [x_min, x_max, y_min, y_max]
+    # We want y_min = channel_indices[0], y_max = channel_indices[-1]
+    # NOTE: imshow with origin='lower' puts index 0 at bottom.
+    # If we supply a subset of data (say 50 rows), but we want it to cover y=100 to y=150:
+    heatmap_extent = [
+        0,
+        ns_plot / fs,
+        channel_indices[0],
+        channel_indices[-1] + 1,
+    ]  # +1 to cover the last channel width
+
+    heatmap_image = voltageshow(
+        current_raw,
+        fs,
+        ax=ax_heatmap,
+        cax=ax_cbar,
+        extent=heatmap_extent,
+        ylim=[channel_indices[0], channel_indices[-1] + 1],
+    )
     ax_heatmap.set(ylabel="Channel")
     ax_heatmap.tick_params(axis="x", colors="white")
 
@@ -610,9 +681,16 @@ def show_channels_labels_interactive(
 
     # draw auto line
     if auto_surface_rel != -1:
+        # We need the relative index for finding where to draw, but since we updated
+        # the axes to use absolute coordinates (channel_indices), we can plot the
+        # absolute channel number directly!
+
+        # Plot at auto_surface_channel + 0.5 (center of the channel bin)
+        line_y = auto_surface_channel + 0.5
+
         for ax_i in all_plot_axes:
             line = ax_i.axhline(
-                auto_surface_rel + 0.5,
+                line_y,
                 color=SURFACE_COLOR,
                 linestyle="--",
                 linewidth=2,
@@ -631,13 +709,13 @@ def show_channels_labels_interactive(
 
     def on_click(event):
         if event.inaxes in all_plot_axes and event.ydata is not None:
-            clicked_ch_rel = int(np.round(event.ydata))
-            clicked_ch_rel = max(0, min(nc - 1, clicked_ch_rel))
+            # ydata is now in real channel indices
+            clicked_ch_abs = int(np.round(event.ydata))
 
-            if shank_channels is not None:
-                clicked_ch_abs = shank_channels[clicked_ch_rel]
-            else:
-                clicked_ch_abs = clicked_ch_rel
+            # constrain to valid range within the current view
+            # find nearest channel in channel_indices
+            idx = (np.abs(channel_indices - clicked_ch_abs)).argmin()
+            clicked_ch_abs = channel_indices[idx]
 
             state["user_surface_channel"] = clicked_ch_abs
             state["final_channel"] = clicked_ch_abs
@@ -648,9 +726,10 @@ def show_channels_labels_interactive(
             state["user_line"] = []
 
             # draw new lines
+            line_y = clicked_ch_abs + 0.5
             for ax_i in all_plot_axes:
                 line = ax_i.axhline(
-                    clicked_ch_rel + 0.5,
+                    line_y,
                     color=SURFACE_COLOR,
                     linestyle="-",
                     linewidth=3,
@@ -689,32 +768,43 @@ def show_channels_labels_interactive(
             fig.canvas.draw_idle()
             return
 
-        ch = int(np.round(event.ydata))
-        if not (0 <= ch < nc):
+        # ydata is absolute channel index
+        ch_abs = int(np.round(event.ydata))
+
+        # check if this channel is in our current subset
+        if ch_abs not in channel_indices:
             return
+
+        # Get relative index for looking up data arrays
+        # (Assuming channel_indices is sorted, which it should be)
+        # using searchsorted or just where
+        matches = np.where(channel_indices == ch_abs)[0]
+        if len(matches) == 0:
+            return
+        idx_rel = matches[0]
 
         txt = ""
         if event.inaxes == ax_hf_coh:
-            txt = f"Ch {ch}: HF coherence = {xfeats['xcor_hf'][ch]:.4f}"
+            txt = f"Ch {ch_abs}: HF coherence = {xfeats['xcor_hf'][idx_rel]:.4f}"
         elif event.inaxes == ax_psd_hf:
-            txt = f"Ch {ch}: HF Noise (PSD) = {xfeats['psd_hf'][ch]:.4f}"
+            txt = f"Ch {ch_abs}: HF Noise (PSD) = {xfeats['psd_hf'][idx_rel]:.4f}"
         elif event.inaxes == ax_lf_coh:
-            txt = f"Ch {ch}: LF coherence = {xfeats['xcor_lf'][ch]:.4f}"
+            txt = f"Ch {ch_abs}: LF coherence = {xfeats['xcor_lf'][idx_rel]:.4f}"
         elif event.inaxes == ax_lf_pow and "rms_lf" in xfeats:
-            txt = f"Ch {ch}: LF Power = {xfeats['rms_lf'][ch] * 1e6:.1f} uV"
+            txt = f"Ch {ch_abs}: LF Power = {xfeats['rms_lf'][idx_rel] * 1e6:.1f} uV"
         elif event.inaxes == ax_gamma_pow and "power_gamma" in xfeats:
-            txt = f"Ch {ch}: Gamma Power = {xfeats['power_gamma'][ch]:.2f} uV²/Hz"
+            txt = f"Ch {ch_abs}: Gamma Power = {xfeats['power_gamma'][idx_rel]:.2f} uV²/Hz"
         elif event.inaxes == ax_sp_amp and spike_amplitudes is not None:
-            txt = f"Ch {ch}: Spike Amp = {spike_amplitudes[ch] * 1e6:.1f} uV"
+            txt = f"Ch {ch_abs}: Spike Amp = {spike_amplitudes[idx_rel] * 1e6:.1f} uV"
         elif event.inaxes == ax_fr and firing_rates is not None:
-            txt = f"Ch {ch}: Firing Rate = {firing_rates[ch]:.1f} Hz"
+            txt = f"Ch {ch_abs}: Firing Rate = {firing_rates[idx_rel]:.1f} Hz"
         elif event.inaxes == ax_heatmap:
             x_time = event.xdata
             if 0 <= x_time <= ns_plot / fs:
-                idx = int(x_time * fs)
-                if idx < ns_plot:
-                    val = raw[ch, idx] * 1e6
-                    txt = f"Ch {ch}, t={x_time:.3f}s: {val:.1f} uV"
+                t_idx = int(x_time * fs)
+                if t_idx < ns_plot:
+                    val = raw[idx_rel, t_idx] * 1e6
+                    txt = f"Ch {ch_abs}, t={x_time:.3f}s: {val:.1f} uV"
 
         hover_text.set_text(txt)
         fig.canvas.draw_idle()
@@ -723,12 +813,12 @@ def show_channels_labels_interactive(
     fig.canvas.mpl_connect("motion_notify_event", on_hover)
 
     def save_plot():
-        if shank_id is not None:
-            fname = bin_path.with_suffix("").with_suffix(
-                f".SURFACE_SHANK{shank_id}.png"
-            )
-        else:
-            fname = bin_path.with_suffix("").with_suffix(".SURFACE.png")
+        shank_num = shank_id if shank_id is not None else 0
+        # Naming convention: surface_<input_file_name>_<shank_number>.png
+        fname = (
+            bin_path.parent
+            / f"surface_{bin_path.name}_{shank_num}{channel_range_suffix}.png"
+        )
         fig.savefig(fname, dpi=150, bbox_inches="tight")
         print(f"Plot saved to: {fname}")
 

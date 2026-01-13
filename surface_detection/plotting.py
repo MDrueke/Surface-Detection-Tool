@@ -787,11 +787,16 @@ def show_channels_labels_interactive(
         if event.inaxes == ax_hf_coh:
             txt = f"Ch {ch_abs}: HF coherence = {xfeats['xcor_hf'][idx_rel]:.4f}"
         elif event.inaxes == ax_psd_hf:
-            txt = f"Ch {ch_abs}: HF Noise (PSD) = {xfeats['psd_hf'][idx_rel]:.4f}"
+            txt = f"Ch {ch_abs}: HF Power = {xfeats['psd_hf'][idx_rel]:.4f}"
         elif event.inaxes == ax_lf_coh:
             txt = f"Ch {ch_abs}: LF coherence = {xfeats['xcor_lf'][idx_rel]:.4f}"
-        elif event.inaxes == ax_lf_pow and "rms_lf" in xfeats:
-            txt = f"Ch {ch_abs}: LF Power = {xfeats['rms_lf'][idx_rel] * 1e6:.1f} uV"
+        elif event.inaxes == ax_lf_pow:
+            if "mean_abs_volt" in xfeats:
+                txt = f"Ch {ch_abs}: Mean Absolute Voltage = {xfeats['mean_abs_volt'][idx_rel] * 1e6:.1f} uV"
+            elif "rms_lf" in xfeats:
+                txt = (
+                    f"Ch {ch_abs}: LF Power = {xfeats['rms_lf'][idx_rel] * 1e6:.1f} uV"
+                )
         elif event.inaxes == ax_gamma_pow and "power_gamma" in xfeats:
             txt = f"Ch {ch_abs}: Gamma Power = {xfeats['power_gamma'][idx_rel]:.2f} uV²/Hz"
         elif event.inaxes == ax_sp_amp and spike_amplitudes is not None:
